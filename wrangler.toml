@@ -1,0 +1,33 @@
+name = "edgenote"
+compatibility_date = "2026-10-25"
+compatibility_flags = ["nodejs_compat"]
+pages_build_output_dir = ".vercel/output/static"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "edgenote-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "drizzle"
+
+[[r2_buckets]]
+binding = "STORAGE"
+bucket_name = "edgenote-storage"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[ai]
+binding = "AI"
+
+[[vectorize]]
+binding = "VECTOR_INDEX"
+index_name = "edgenote-index"
+
+[[durable_objects.bindings]]
+name = "DOCUMENT_SESSIONS"
+class_name = "DocumentSession"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DocumentSession"]
