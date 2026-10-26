@@ -21,6 +21,9 @@ Guests see the public landing page at `/`. An active session is redirected to `/
 ## Tech Stack
 
 ![Next.js 15](https://img.shields.io/badge/Next.js-15-black?logo=next.js)
+![React 19](https://img.shields.io/badge/React-19-149ECA?logo=react)
+![TypeScript 5](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript)
+![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-3-06B6D4?logo=tailwindcss)
 ![Drizzle ORM](https://img.shields.io/badge/Drizzle-ORM-C5F74F?logo=drizzle)
 ![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare)
 ![Cloudflare D1](https://img.shields.io/badge/Cloudflare-D1-F38020?logo=cloudflare)
@@ -30,6 +33,17 @@ Guests see the public landing page at `/`. An active session is redirected to `/
 ![Durable Objects](https://img.shields.io/badge/Cloudflare-Durable%20Objects-F38020?logo=cloudflare)
 
 Next.js 15 App Router and React provide the application UI and API routes. Drizzle ORM defines the SQLite schema and D1 access. OpenNext deploys the app as a Cloudflare Worker, with D1 for relational document data, R2 for files, Workers AI for inference, Vectorize for embeddings, and Durable Objects for collaborative document rooms.
+
+## Project Stats
+
+| Metric | Count |
+| --- | ---: |
+| Tracked source lines | 5,613 |
+| Tracked source files | 61 |
+| App Router API endpoints | 19 |
+| D1 SQL migrations | 3 |
+
+Source totals count tracked TypeScript, TSX, JavaScript, JSX, CSS, and SQL files; they exclude documentation and dependency lockfiles. These are repository snapshot counts and will change as the project grows.
 
 ## Quickstart
 
