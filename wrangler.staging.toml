@@ -1,0 +1,41 @@
+name = "edgenote-staging"
+main = "worker.ts"
+compatibility_date = "2026-10-25"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "edgenote-staging-db"
+database_id = "6d9c6c98-b197-49eb-8dce-776fa0a27691"
+migrations_dir = "drizzle"
+
+[[r2_buckets]]
+binding = "STORAGE"
+bucket_name = "edgenote-staging-storage"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "5e78e92726b2447ba028acf02c8180ba"
+
+[ai]
+binding = "AI"
+
+[[vectorize]]
+binding = "VECTOR_INDEX"
+index_name = "edgenote-staging-index"
+
+[[durable_objects.bindings]]
+name = "DOCUMENT_SESSIONS"
+class_name = "DocumentSession"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DocumentSession"]
+
+[[services]]
+binding = "WORKER_SELF_REFERENCE"
+service = "edgenote-staging"

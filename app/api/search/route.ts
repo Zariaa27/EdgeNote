@@ -1,19 +1,19 @@
-import { getRequestContext } from "@cloudflare/next-on-pages";
-import { inArray } from "drizzle-orm";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { and, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { documents } from "../../../src/db/schema";
-
-export const runtime = "edge";
+import { getSessionUserId } from "../../../src/server/auth";
 
 interface SearchBindings {
   DB: D1Database;
+  AUTH_SECRET: string;
   AI: {
     run<T>(model: string, input: Record<string, unknown>): Promise<T>;
   };
   VECTOR_INDEX: {
     query(
       vector: number[],
-      options: { topK: number },
+      options: { topK: number; filter: Record<string, string> },
     ): Promise<{ matches?: Array<{ id: string; score: number }> }>;
   };
 }
@@ -42,8 +42,10 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   try {
-    const { env } = getRequestContext();
+    const { env } = getCloudflareContext();
     const bindings = env as unknown as SearchBindings;
+    const userId = await getSessionUserId(request, bindings.AUTH_SECRET);
+    if (!userId) return Response.json({ error: "Sign in required." }, { status: 401 });
     const embeddingResult = await bindings.AI.run<EmbeddingResult>(
       "@cf/baai/bge-small-en-v1.5",
       { text: [query] },
@@ -54,27 +56,33 @@ export async function GET(request: Request): Promise<Response> {
       return Response.json({ error: "AI did not return a valid query embedding." }, { status: 502 });
     }
 
-    const vectorResult = await bindings.VECTOR_INDEX.query(vector, { topK: 5 });
+    const vectorResult = await bindings.VECTOR_INDEX.query(vector, {
+      topK: 5,
+      filter: { ownerId: userId },
+    });
     const matches = (vectorResult.matches ?? [])
       .filter((match) => match.id && Number.isFinite(match.score))
       .sort((left, right) => right.score - left.score);
 
     if (matches.length === 0) {
-      return Response.json({ query, results: [] });
+      return Response.json({ query, results: [] }, { headers: { "Cache-Control": "no-store" } });
     }
 
     const db = drizzle(bindings.DB);
     const rows = await db
       .select()
       .from(documents)
-      .where(inArray(documents.id, matches.map((match) => match.id)));
+      .where(and(
+        inArray(documents.id, matches.map((match) => match.id)),
+        eq(documents.authorId, userId),
+      ));
     const documentsById = new Map(rows.map((document) => [document.id, document]));
     const results = matches.flatMap((match) => {
       const document = documentsById.get(match.id);
       return document ? [{ document, score: match.score }] : [];
     });
 
-    return Response.json({ query, results });
+    return Response.json({ query, results }, { headers: { "Cache-Control": "no-store" } });
   } catch {
     return Response.json({ error: "Unable to search documents." }, { status: 500 });
   }

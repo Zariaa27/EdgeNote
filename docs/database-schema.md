@@ -7,6 +7,7 @@ The schema is defined in `src/db/schema.ts` using Drizzle's SQLite core for Clou
 ```mermaid
 erDiagram
     USERS ||--o{ DOCUMENTS : authors
+    USERS ||--o{ ACCOUNT_TOKENS : secures
     DOCUMENTS o|--o{ DOCUMENTS : contains
     DOCUMENTS ||--o{ ATTACHMENTS : has
     DOCUMENTS ||--o{ DOCUMENT_TAGS : labeled_with
@@ -16,6 +17,17 @@ erDiagram
         text id PK
         text email UK
         text name
+        text password_hash
+        integer email_verified_at
+        integer created_at
+    }
+    ACCOUNT_TOKENS {
+        text id PK
+        text user_id FK
+        text token_hash UK
+        text purpose
+        text target_email
+        integer expires_at
         integer created_at
     }
     DOCUMENTS {
@@ -27,6 +39,13 @@ erDiagram
         boolean is_public
         integer created_at
         integer updated_at
+    }
+    DOCUMENT_SHARES {
+        text id PK
+        text document_id FK
+        text email
+        text role
+        integer created_at
     }
     TAGS {
         text id PK
@@ -50,18 +69,20 @@ erDiagram
 ## Relations
 
 - A user authors zero or more documents. Deleting a user cascades to their documents.
+- Account tokens are single-use, hashed verification and password-reset tokens; they cascade when a user is deleted. Existing accounts are treated as verified when the verification migration is applied, while newly registered accounts must confirm their email before sign-in.
 - A document may reference a parent document through `parentFolderId`; deleting the parent sets child references to `NULL`. Documents serve as the hierarchy's parent/folder records because there is no separate folders table.
 - Documents and tags have a many-to-many relationship through `document_tags`. Its composite primary key prevents duplicate assignments; deleting either endpoint removes the join row.
 - A document has zero or more attachments. Deleting a document cascades to its attachments; `r2Key` stores the corresponding object key in R2.
+- Document shares grant `viewer` or `editor` access to a verified email address. The `(documentId, email)` pair is unique, and deleting the document removes its grants.
 - User email and tag name are unique. `isPublic` is a SQLite integer boolean and defaults to `false`.
 
 ## Local Migrations
 
-Install Drizzle Kit, Drizzle ORM, and Wrangler if they are not already project dependencies. Generate SQL migrations from the schema, then apply them to the local D1 database:
+Generate SQL migrations from the schema, review the SQL in `drizzle/`, then apply pending migrations to the local D1 database:
 
 ```sh
-npx drizzle-kit generate --name=initial
-npx wrangler d1 migrations apply DB --local
+npm run db:generate
+npm run db:migrate:local
 ```
 
 `drizzle.config.ts` writes SQL into `drizzle/`, and the D1 binding in `wrangler.toml` sets that directory as its `migrations_dir`. To check that the local tables were created:
@@ -72,14 +93,11 @@ npx wrangler d1 execute DB --local --command "SELECT name FROM sqlite_master WHE
 
 ## Local Seeding
 
-Create a SQL seed file at `drizzle/seed.sql`, with inserts matching the schema, then execute it against local D1. For example:
+Create a test account through the registration form or `POST /api/auth/register` so its password is hashed by the application. Use that returned user ID when creating test documents. Do not insert a user directly with SQL: `password_hash` is required and must use the application's password-hash format.
 
 ```sql
-INSERT INTO users (id, email, name)
-VALUES ('seed-user-1', 'writer@example.com', 'Example Writer');
-
 INSERT INTO documents (id, title, content, author_id)
-VALUES ('seed-document-1', 'Welcome', '# Welcome', 'seed-user-1');
+VALUES ('seed-document-1', 'Welcome', '# Welcome', 'YOUR_REGISTERED_USER_ID');
 
 INSERT INTO tags (id, name)
 VALUES ('seed-tag-1', 'getting-started');

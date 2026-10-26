@@ -1,9 +1,11 @@
 import { relations, sql } from "drizzle-orm";
 import {
   integer,
+  index,
   primaryKey,
   sqliteTable,
   text,
+  uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 import type { AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 
@@ -13,10 +15,32 @@ export const users = sqliteTable("users", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   email: text("email").notNull().unique(),
   name: text("name").notNull(),
+  passwordHash: text("password_hash").notNull(),
+  emailVerifiedAt: integer("email_verified_at", { mode: "timestamp_ms" }),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .default(currentTime),
 });
+
+export const accountTokens = sqliteTable(
+  "account_tokens",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull().unique(),
+    purpose: text("purpose").notNull(),
+    targetEmail: text("target_email"),
+    expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .notNull()
+      .default(currentTime),
+  },
+  (table) => ({
+    userPurposeIdx: index("account_tokens_user_purpose_idx").on(table.userId, table.purpose),
+  }),
+);
 
 export const documents = sqliteTable("documents", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
@@ -37,6 +61,25 @@ export const documents = sqliteTable("documents", {
     .notNull()
     .default(currentTime),
 });
+
+export const documentShares = sqliteTable(
+  "document_shares",
+  {
+    id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    role: text("role", { enum: ["viewer", "editor"] }).notNull().default("viewer"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .notNull()
+      .default(currentTime),
+  },
+  (table) => ({
+    documentEmailUnique: uniqueIndex("document_shares_document_email_unique").on(table.documentId, table.email),
+    emailIdx: index("document_shares_email_idx").on(table.email),
+  }),
+);
 
 export const tags = sqliteTable("tags", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
@@ -74,6 +117,14 @@ export const attachments = sqliteTable("attachments", {
 
 export const usersRelations = relations(users, ({ many }) => ({
   documents: many(documents),
+  accountTokens: many(accountTokens),
+}));
+
+export const accountTokensRelations = relations(accountTokens, ({ one }) => ({
+  user: one(users, {
+    fields: [accountTokens.userId],
+    references: [users.id],
+  }),
 }));
 
 export const documentsRelations = relations(documents, ({ one, many }) => ({
@@ -89,6 +140,14 @@ export const documentsRelations = relations(documents, ({ one, many }) => ({
   childDocuments: many(documents, { relationName: "documentHierarchy" }),
   tags: many(documentTags),
   attachments: many(attachments),
+  shares: many(documentShares),
+}));
+
+export const documentSharesRelations = relations(documentShares, ({ one }) => ({
+  document: one(documents, {
+    fields: [documentShares.documentId],
+    references: [documents.id],
+  }),
 }));
 
 export const tagsRelations = relations(tags, ({ many }) => ({
@@ -115,8 +174,10 @@ export const attachmentsRelations = relations(attachments, ({ one }) => ({
 
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
+export type AccountToken = typeof accountTokens.$inferSelect;
 export type Document = typeof documents.$inferSelect;
 export type NewDocument = typeof documents.$inferInsert;
+export type DocumentShare = typeof documentShares.$inferSelect;
 export type Tag = typeof tags.$inferSelect;
 export type NewTag = typeof tags.$inferInsert;
 export type DocumentTag = typeof documentTags.$inferSelect;

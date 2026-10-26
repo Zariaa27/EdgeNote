@@ -1,63 +1,42 @@
-# Run EdgeNote on Cloudflare
+# Getting Started
 
-## Current State: Deployment Blocked
+EdgeNote runs as a Cloudflare Worker built with Next.js and OpenNext. The production entrypoint is `worker.ts`; do not deploy it as a Pages project. `npm run dev` starts the Next.js development server, while `npm run preview` builds the OpenNext Worker and runs it in Wrangler with Cloudflare bindings.
 
-This checkout is not yet a runnable Next.js app. It has no `package.json`, Next.js root page/layout, or package scripts. The existing `app/` directory contains API routes only. Real-time editing also needs an `/api/realtime` WebSocket upgrade route and a Pages/Worker entrypoint that exports `DocumentSession`. The editor's default image URL needs a media-serving route or a public R2 URL.
+## Prerequisites
 
-Do not expect `npm run dev`, a build, or deployment to work until those pieces are added. The steps below cover the exact Cloudflare setup and commands to run once the app shell and Cloudflare adapter wiring are in place.
+- Node.js 20 or newer and npm.
+- A Cloudflare account with Workers, D1, R2, Workers KV, Workers AI, Vectorize, and Durable Objects available.
+- Wrangler authentication (`npx wrangler login`) or a narrowly scoped Cloudflare API token.
 
-## 1. Clone the Repository
-
-Install Git, Node.js 20 or newer, and npm, then run:
-
-```sh
-git clone https://github.com/Zariaa27/EdgeNote.git
-cd EdgeNote
-```
-
-## 2. Complete the Next.js App Shell
-
-Before installing or building, add a Next.js 15 app manifest and configuration compatible with the Cloudflare Pages adapter used by this project. At minimum, the repository needs:
-
-- `package.json` with `dev`, `build`, and a Pages build script that produces `.vercel/output/static`.
-- Dependencies for Next.js 15, React, Drizzle ORM, Drizzle Kit, Wrangler, Lucide React, and `@cloudflare/next-on-pages`.
-- `app/layout.tsx` and `app/page.tsx`; the page should mount `components/Editor` with an existing D1 document ID.
-- A WebSocket route that forwards `/api/realtime?documentId=...` to the `DOCUMENT_SESSIONS` Durable Object, and an adapter Worker entrypoint that exports the `DocumentSession` class.
-- A media-serving route or public R2 custom domain. `/api/upload` returns a media key, not a browser URL.
-
-Use a Cloudflare-supported Next.js 15 adapter configuration. The existing Wrangler configuration expects Pages output at `.vercel/output/static`; do not deploy until your build actually creates that directory. For Durable Object/WebSocket wiring, follow [the real-time architecture guide](architecture-realtime.md).
-
-After `package.json` exists, install its dependencies with:
+Install dependencies and create the local Drizzle environment:
 
 ```sh
-npm install
+npm ci
+cp .env.example .env.local
 npx wrangler login
 ```
 
-## 3. Create Cloudflare Resources
+## Create Cloudflare Resources
 
-These commands create remote resources in the Cloudflare account authenticated by Wrangler. Save every returned ID.
+Create the remote resources in the Cloudflare account used by Wrangler. Save each returned ID:
 
 ```sh
 npx wrangler d1 create edgenote-db
 npx wrangler r2 bucket create edgenote-storage
 npx wrangler kv namespace create CACHE
 npx wrangler vectorize create edgenote-index --dimensions=384 --metric=cosine
+npx wrangler vectorize create-metadata-index edgenote-index --propertyName=ownerId --type=string
 ```
 
-Workers AI does not need a separate namespace; enable it for the account if prompted. The Vectorize index must be 384-dimensional because this project embeds with `@cf/baai/bge-small-en-v1.5`.
+Set the D1 `database_id` and KV `id` in `wrangler.toml`. The D1 database name, R2 bucket name, and Vectorize index name must match the resource names above. The Vectorize index is 384-dimensional because `@cf/baai/bge-small-en-v1.5` generates 384-value embeddings.
 
-Edit `wrangler.toml` and replace `REPLACE_WITH_D1_DATABASE_ID` and `REPLACE_WITH_KV_NAMESPACE_ID` with the IDs from Wrangler. Keep the configured D1 database, R2 bucket, KV binding, Vectorize index, and Durable Object class names in sync with the resources and Worker exports.
+The `ownerId` metadata index is required: document embeddings include that metadata and semantic search filters on it to keep results private to their owner. Wait for Wrangler to confirm the metadata index is available before testing search. Vectorize processes upserts asynchronously; during staging verification, a new vector took about 35 seconds to become searchable. Retest after the index processes the mutation rather than treating an immediate empty result as a binding failure.
 
-## 4. Configure Credentials and Secrets
+Workers AI is bound through the `[ai]` entry and does not need a separately-created resource. Durable Objects are bound to the `DocumentSession` class exported by `worker.ts`; Wrangler applies the SQLite class migration declared in `wrangler.toml`.
 
-Create local Drizzle credentials from the template:
+## Configure Environment and Secrets
 
-```sh
-cp .env.example .env.local
-```
-
-Set `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_D1_DATABASE_ID`, and `CLOUDFLARE_D1_TOKEN` in `.env.local`. Drizzle Kit uses these for remote D1 access. Load them into the shell before running Drizzle commands:
+`.env.local` is used by Drizzle Kit for remote D1 operations. Set `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_D1_DATABASE_ID`, and `CLOUDFLARE_D1_TOKEN` there. Load those values into your shell before running Drizzle Kit:
 
 ```sh
 set -a
@@ -65,143 +44,89 @@ set -a
 set +a
 ```
 
-For local signed image uploads, put a generated secret in `.dev.vars`:
+For local Worker development, create `.dev.vars` in the repository root with two independent random secrets:
 
 ```text
-UPLOAD_SIGNING_SECRET=replace-with-a-random-secret
+AUTH_SECRET=replace-with-at-least-32-random-bytes
+UPLOAD_SIGNING_SECRET=replace-with-a-different-random-secret
 ```
 
-Ensure `.env.local` and `.dev.vars` are in `.gitignore`; never commit Cloudflare tokens or upload secrets. For production, set the upload secret separately:
+Generate unique values of at least 32 random bytes; do not use the example placeholders. Keep `.env.local` and `.dev.vars` untracked. Set the same secrets in the production Worker environment; Wrangler prompts for each secret value:
 
 ```sh
-npx wrangler pages secret put UPLOAD_SIGNING_SECRET
+npx wrangler secret put AUTH_SECRET
+npx wrangler secret put UPLOAD_SIGNING_SECRET
 ```
 
-## 5. Generate and Apply Database Migrations
+Do not use the Drizzle API token as an application secret or put secrets in `wrangler.toml` or any `NEXT_PUBLIC_*` variable.
 
-Generate SQL from `src/db/schema.ts`, then apply it to the local D1 emulator:
+Account verification, email changes, and password recovery use Resend for transactional email. Configure the Resend API key as a Worker secret, set a verified sender address and the public app URL as Worker variables, and add these local values to `.dev.vars` for local development:
 
-```sh
-npx drizzle-kit generate --name=initial
-npx wrangler d1 migrations apply DB --local
+```text
+RESEND_API_KEY=your-resend-api-key
+EMAIL_FROM=EdgeNote <accounts@example.com>
+APP_URL=http://localhost:8787
 ```
 
-The generated migrations go into `drizzle/`, which is also configured as the D1 `migrations_dir`. To inspect the local database:
+Use the deployed HTTPS URL for `APP_URL` in staging/production. Without these values, registration will not complete email verification, and the verification/reset actions will explicitly report that email delivery is not configured. Never commit the Resend key.
+
+## Apply Database Migrations
+
+The initial migration is checked into `drizzle/`. Apply it to the local D1 emulator before using the app:
 
 ```sh
+npm run db:migrate:local
 npx wrangler d1 execute DB --local --command "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name;"
 ```
 
-For production, apply migrations only after verifying them:
+When the schema changes, generate a new migration from `src/db/schema.ts`, review the generated SQL, and apply it locally:
 
 ```sh
-npx wrangler d1 migrations apply DB --remote
+npm run db:generate
+npm run db:migrate:local
 ```
 
-## 6. Build and Test Locally
-
-The app shell and adapter setup from step 2 must provide the Pages build script. Build the output and run it in Wrangler's local Pages runtime:
+Apply reviewed migrations to production before deploying code that depends on them:
 
 ```sh
-npm run pages:build
-npx wrangler pages dev .vercel/output/static --do DOCUMENT_SESSIONS=DocumentSession --persist-to .wrangler/state
+npm run db:migrate:remote
 ```
 
-Wrangler serves Pages at `http://localhost:8788` by default and emulates D1, R2, and KV locally. Vectorize has no local emulator; search requires the configured remote index. Test the API routes at `/api/ai/summarize`, `/api/search?query=...`, and `/api/upload`. Real-time sync additionally requires the WebSocket route from step 2.
+## Develop and Verify Locally
 
-`npm run dev` is the Next.js development server. Use the Wrangler Pages command above to test Cloudflare bindings; the two commands are not interchangeable.
-
-## 7. Deploy to Cloudflare Pages
-
-Create the Pages project once, apply reviewed migrations, build the Pages output, and deploy it:
+For UI work, run the Next.js dev server:
 
 ```sh
-npx wrangler pages project create edgenote
-npx wrangler d1 migrations apply DB --remote
-npm run pages:build
-npx wrangler pages deploy .vercel/output/static --project-name=edgenote
+npm run dev
 ```
 
-If the Pages project already exists, skip its create command. Configure the production domain in Cloudflare Pages. Confirm the Pages deployment includes the D1, R2, KV, AI, Vectorize, and Durable Object bindings from `wrangler.toml`, and that the Worker bundle exports `DocumentSession`.
-
-## 8. Verify the Deployment
-
-- Open the Pages deployment URL and load a document that exists in D1.
-- Call `GET /api/search?query=...` and verify it returns document rows and similarity scores.
-- Upload an image and confirm the resulting media key resolves through your media route or R2 custom domain.
-- Connect two browser sessions to the same document and confirm edits synchronize and are saved to D1.
-
-For endpoint payloads and response examples, see [API Routes](api-routes.md). For schema and seed SQL, see [Database Schema](database-schema.md).# Getting Started
-
-## Prerequisites
-
-- Node.js 20 LTS or newer and npm.
-- A Cloudflare account with Pages, D1, R2, Workers KV, Workers AI, and Vectorize available. Some services may require billing or an account-level enablement step.
-- A Cloudflare API token with the permissions needed to manage D1, R2, Workers KV, Vectorize, and Pages. Use a narrowly scoped token for your account.
-- Wrangler CLI. From the project root, install it as a development dependency with `npm install --save-dev wrangler`, then use `npx wrangler` for commands. Authenticate with `npx wrangler login`.
-
-## Create Cloudflare Resources
-
-Wrangler's local mode is used for development. D1 creates a local database on first use; R2 and KV are emulated locally by Wrangler. Vectorize has no local emulator, so its binding requires a remote index. Resource creation commands below create the remote resources in your Cloudflare account.
-
-After your Next.js-on-Pages adapter has generated `.vercel/output/static`, start the local Pages runtime with:
+To build and run the app in Wrangler's Cloudflare runtime with local D1, R2, KV, and Durable Object storage:
 
 ```sh
-npx wrangler pages dev .vercel/output/static
+npm run preview
 ```
 
-This starts the app with local D1, R2, and KV bindings from `wrangler.toml`. Use the remote-resource commands below to create the production resources; you do not create separate remote R2 or KV resources for local development.
+Wrangler serves the Worker at `http://localhost:8787` by default. Guests see the public landing page at `/`; once signed in, opening `/` redirects to `/workspace`. Local development needs the secrets from `.dev.vars`, a local D1 migration, and Cloudflare authentication for Workers AI's remote binding (use `npx wrangler login`, or `CLOUDFLARE_API_TOKEN` in non-interactive environments). Vectorize has no local emulator; validate search against a configured remote binding or a non-production deployment.
 
-### D1
+Register or sign in through the app before exercising authenticated endpoints. Test note creation with private/public access and email invitations, editing, owner deletion, leaving a shared note, `/api/ai/summarize`, `/api/search`, image upload/media retrieval, realtime synchronization with two clients, account verification, password recovery, account export, account deletion, public view-only links, and viewer/editor email shares. Email invitations require Resend configuration. The editor reports WebSocket connectivity separately from persistence; its save-status button requests an immediate save, while automatic saves continue in the background. “Saved” is shown only after a Durable Object acknowledgement confirms the corresponding revision was written to D1. The realtime preflight also checks that the document's Durable Object room can load before attempting the WebSocket upgrade. Account settings are at `/settings`. Visit `/admin` to see operational analytics only when signed in as `alexistrudeau94@gmail.com`; the analytics API enforces this restriction on the server. See [API Routes](api-routes.md) and [Real-Time Collaboration Architecture](architecture-realtime.md) for request formats and the WebSocket protocol.
 
-Create the database and save the returned database ID:
+Run static checks and a production build before deploying:
 
 ```sh
-npx wrangler d1 create edgenote-db
+npm run typecheck
+npm run lint
+npm run build
 ```
 
-Set the returned ID as `database_id` in `wrangler.toml` in the `[[d1_databases]]` entry. Local use is available through commands such as `npx wrangler d1 execute DB --local --command "SELECT 1"`; use `--remote` to execute against the Cloudflare database.
+The build command first runs `next build` and then packages the result for Cloudflare Workers. `open-next.config.ts` intentionally configures the inner build command to avoid recursively invoking the OpenNext build script.
 
-### R2
+## Deploy to Cloudflare Workers
+
+Confirm `wrangler.toml` contains the production D1 and KV IDs and that the Worker secrets are configured. Apply the reviewed D1 migrations, then build and deploy:
 
 ```sh
-npx wrangler r2 bucket create edgenote-storage
+npm run db:migrate:remote
+npm run deploy
 ```
 
-The bucket name must match `bucket_name` in the `[[r2_buckets]]` entry in `wrangler.toml`. Local development uses Wrangler's R2 emulator; it does not need a separately-created local bucket.
-
-### KV
-
-```sh
-npx wrangler kv namespace create CACHE
-```
-
-Copy the returned namespace ID into `id` in the `[[kv_namespaces]]` entry in `wrangler.toml`. Wrangler provides local KV emulation during local development.
-
-### Workers AI
-
-Workers AI is enabled through the account's AI access; there is no namespace or index to create. The `[ai]` entry in `wrangler.toml` binds it to the application as `AI`. Confirm Workers AI is available for your account before deploying.
-
-### Vectorize
-
-The configured embedding model, `@cf/baai/bge-small-en-v1.5`, produces 384-dimensional vectors. Create an index with matching dimensions and cosine distance:
-
-```sh
-npx wrangler vectorize create edgenote-index --dimensions=384 --metric=cosine
-```
-
-The index name must match `index_name` in the `[[vectorize]]` entry in `wrangler.toml`. Vectorize is remote-only; local Pages development must be configured to use the remote index if that functionality is needed.
-
-## Environment Variables
-
-Copy the template to your local environment file:
-
-```sh
-cp .env.example .env.local
-```
-
-Set `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_D1_DATABASE_ID`, and `CLOUDFLARE_D1_TOKEN` in `.env.local` for Drizzle Kit's D1 HTTP driver. The token must be permitted to access the specified D1 database. Keep `.env.local` out of version control and do not put API tokens in `NEXT_PUBLIC_*` variables. The optional `NEXT_PUBLIC_APP_URL` is safe to expose to client code.
-
-The D1, R2, KV, Workers AI, and Vectorize bindings are supplied by the Cloudflare runtime through `wrangler.toml`; do not duplicate those bindings as application secrets. Replace the D1 and KV placeholder IDs in that file with the IDs returned by Wrangler before deploying. The R2 bucket and Vectorize index names in the file must match the resources you created.
-
-To use Drizzle Kit, install the project dependencies that provide `drizzle-kit` and `drizzle-orm`, then add the application's schema at `src/db/schema.ts` or update the `schema` path in `drizzle.config.ts`. Generate migrations with `npx drizzle-kit generate`. Apply migrations to local D1 with `npx wrangler d1 migrations apply DB --local`, or to Cloudflare D1 with `npx wrangler d1 migrations apply DB --remote`.
+Configure the production domain in the Cloudflare Worker settings. After deployment, verify the app can register/sign in, access only the current user's documents, save edits to D1, resolve uploaded media, use AI/search, and reconnect realtime clients. Do not use production credentials or `--remote` for local experiments.

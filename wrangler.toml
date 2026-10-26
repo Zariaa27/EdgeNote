@@ -1,7 +1,11 @@
 name = "edgenote"
+main = "worker.ts"
 compatibility_date = "2026-10-25"
 compatibility_flags = ["nodejs_compat"]
-pages_build_output_dir = ".vercel/output/static"
+
+[assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
 
 [[d1_databases]]
 binding = "DB"
@@ -31,3 +35,7 @@ class_name = "DocumentSession"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["DocumentSession"]
+
+[[services]]
+binding = "WORKER_SELF_REFERENCE"
+service = "edgenote"

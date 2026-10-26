@@ -1,9 +1,8 @@
-import { getRequestContext } from "@cloudflare/next-on-pages";
-import { eq } from "drizzle-orm";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { drizzle } from "drizzle-orm/d1";
-import { attachments, documents } from "../../../src/db/schema";
-
-export const runtime = "edge";
+import { attachments } from "../../../src/db/schema";
+import { getSessionUserId, isStrongSecret } from "../../../src/server/auth";
+import { resolveDocumentAccess } from "../../../src/server/document-access";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const PRESIGNED_URL_TTL_SECONDS = 5 * 60;
@@ -16,7 +15,8 @@ const ALLOWED_MIME_TYPES = new Set([
 ]);
 
 interface UploadBindings {
-  DB: Parameters<typeof drizzle>[0];
+  DB: D1Database;
+  AUTH_SECRET?: string;
   STORAGE: {
     put(
       key: string,
@@ -32,6 +32,7 @@ interface UploadBindings {
 }
 
 interface UploadClaims {
+  userId: string;
   documentId: string;
   fileName: string;
   fileSize: number;
@@ -41,7 +42,7 @@ interface UploadClaims {
 }
 
 function getBindings(): UploadBindings {
-  return getRequestContext().env as unknown as UploadBindings;
+  return getCloudflareContext().env as unknown as UploadBindings;
 }
 
 function encodeBase64Url(bytes: Uint8Array): string {
@@ -50,10 +51,12 @@ function encodeBase64Url(bytes: Uint8Array): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
-function decodeBase64Url(value: string): Uint8Array {
+function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
   const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
   const binary = atob(base64 + "=".repeat((4 - (base64.length % 4)) % 4));
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  const bytes = new Uint8Array(new ArrayBuffer(binary.length));
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
 }
 
 async function importSigningKey(secret: string, usage: KeyUsage[]): Promise<CryptoKey> {
@@ -93,6 +96,7 @@ async function verifyClaims(token: string, secret: string): Promise<UploadClaims
 
     const claims = JSON.parse(new TextDecoder().decode(decodeBase64Url(payload))) as UploadClaims;
     if (
+      typeof claims.userId !== "string" ||
       typeof claims.documentId !== "string" ||
       typeof claims.fileName !== "string" ||
       typeof claims.fileSize !== "number" ||
@@ -113,14 +117,12 @@ async function verifyClaims(token: string, secret: string): Promise<UploadClaims
   }
 }
 
-async function documentExists(bindings: UploadBindings, documentId: string): Promise<boolean> {
-  const db = drizzle(bindings.DB);
-  const result = await db
-    .select({ id: documents.id })
-    .from(documents)
-    .where(eq(documents.id, documentId))
-    .limit(1);
-  return result.length > 0;
+async function canEditDocument(request: Request, bindings: UploadBindings, documentId: string, userId: string): Promise<boolean> {
+  const access = await resolveDocumentAccess(request, documentId, {
+    DB: bindings.DB,
+    AUTH_SECRET: bindings.AUTH_SECRET ?? "",
+  });
+  return access.userId === userId && (access.role === "owner" || access.role === "editor");
 }
 
 async function saveUpload(
@@ -191,6 +193,8 @@ function hasImageSignature(content: ArrayBuffer, mimeType: string): boolean {
  */
 export async function POST(request: Request): Promise<Response> {
   const bindings = getBindings();
+  const userId = await getSessionUserId(request, bindings.AUTH_SECRET ?? "");
+  if (!userId) return jsonError("Sign in required.", 401);
   const contentType = request.headers.get("content-type") ?? "";
 
   try {
@@ -213,7 +217,7 @@ export async function POST(request: Request): Promise<Response> {
       if (!ALLOWED_MIME_TYPES.has(file.type)) {
         return jsonError("Unsupported image MIME type.", 415);
       }
-      if (!(await documentExists(bindings, documentId))) {
+      if (!(await canEditDocument(request, bindings, documentId, userId))) {
         return jsonError("Document not found.", 404);
       }
 
@@ -225,6 +229,7 @@ export async function POST(request: Request): Promise<Response> {
       const result = await saveUpload(
         bindings,
         {
+          userId,
           documentId,
           fileName: file.name.slice(0, 255),
           fileSize: file.size,
@@ -260,14 +265,15 @@ export async function POST(request: Request): Promise<Response> {
     ) {
       return jsonError("Valid documentId, fileName, fileSize, and supported mimeType are required.", 400);
     }
-    if (!bindings.UPLOAD_SIGNING_SECRET) {
-      return jsonError("Signed uploads are not configured.", 503);
+    if (!isStrongSecret(bindings.UPLOAD_SIGNING_SECRET)) {
+      return jsonError("Signed uploads are not configured with a strong secret.", 503);
     }
-    if (!(await documentExists(bindings, input.documentId))) {
+    if (!(await canEditDocument(request, bindings, input.documentId, userId))) {
       return jsonError("Document not found.", 404);
     }
 
     const claims: UploadClaims = {
+      userId,
       documentId: input.documentId,
       fileName: input.fileName.slice(0, 255),
       fileSize: input.fileSize,
@@ -294,10 +300,12 @@ export async function PUT(request: Request): Promise<Response> {
   const bindings = getBindings();
   const secret = bindings.UPLOAD_SIGNING_SECRET;
   const token = new URL(request.url).searchParams.get("token");
-  if (!secret || !token) return jsonError("A valid upload token is required.", 401);
+  if (!isStrongSecret(secret) || !token) return jsonError("A valid upload token is required.", 401);
 
   const claims = await verifyClaims(token, secret);
   if (!claims) return jsonError("Upload token is invalid or expired.", 401);
+  const userId = await getSessionUserId(request, bindings.AUTH_SECRET ?? "");
+  if (!userId || userId !== claims.userId) return jsonError("Upload token does not belong to this session.", 401);
 
   const requestMimeType = request.headers.get("content-type")?.split(";")[0].trim();
   if (requestMimeType !== claims.mimeType) {
@@ -317,7 +325,7 @@ export async function PUT(request: Request): Promise<Response> {
     if (!hasImageSignature(content, claims.mimeType)) {
       return jsonError("File bytes do not match the signed image MIME type.", 415);
     }
-    if (!(await documentExists(bindings, claims.documentId))) {
+    if (!(await canEditDocument(request, bindings, claims.documentId, claims.userId))) {
       return jsonError("Document not found.", 404);
     }
 

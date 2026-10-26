@@ -1,0 +1,11 @@
+node_modules/
+.next/
+.vercel/
+.open-next/
+.wrangler/
+out/
+coverage/
+.env*
+!.env.example
+.dev.vars
+*.tsbuildinfo

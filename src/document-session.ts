@@ -1,11 +1,13 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { documents } from "./db/schema";
+import { documentShares, documents, users } from "./db/schema";
+import { getSessionUserId } from "./server/auth";
 
 const SAVE_INTERVAL_MS = 5_000;
 
 interface SessionEnv {
   DB: D1Database;
+  AUTH_SECRET: string;
 }
 
 interface SessionState {
@@ -25,15 +27,17 @@ interface TextPatchMessage {
   start: number;
   deleteCount: number;
   insert: string;
+  clientMutationId?: string;
 }
-
-type ClientMessage = CursorMessage | TextPatchMessage;
 
 export class DocumentSession {
   private readonly sockets = new Set<WebSocket>();
   private documentId: string | null = null;
   private content = "";
   private dirty = false;
+  private revision = 0;
+  private persistedRevision = 0;
+  private draftWrite: Promise<void> = Promise.resolve();
   private initialized = false;
   private initializing: Promise<boolean> | null = null;
 
@@ -43,11 +47,49 @@ export class DocumentSession {
   ) {}
 
   async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.searchParams.get("health") === "1") {
+      const documentId = url.searchParams.get("documentId");
+      if (!documentId) return Response.json({ error: "documentId is required." }, { status: 400 });
+      if (!(await this.loadDocument(documentId))) {
+        return Response.json({ error: "Document room not found." }, { status: 404 });
+      }
+      return Response.json({
+        ok: true,
+        revision: this.revision,
+        persistedRevision: this.persistedRevision,
+      }, { headers: { "Cache-Control": "no-store" } });
+    }
+
+    if (request.method === "DELETE") {
+      const documentId = url.searchParams.get("documentId");
+      if (!documentId || !(await this.loadDocument(documentId))) {
+        return Response.json({ error: "Document room not found." }, { status: 404 });
+      }
+      for (const socket of this.getSockets()) {
+        try {
+          socket.close(1000, "Document deleted");
+        } catch (error) {
+          console.error("Unable to close a deleted document socket.", error);
+        }
+      }
+      await this.state.storage.deleteAll();
+      await this.state.storage.deleteAlarm();
+      this.sockets.clear();
+      this.documentId = null;
+      this.content = "";
+      this.revision = 0;
+      this.persistedRevision = 0;
+      this.dirty = false;
+      this.initialized = false;
+      return Response.json({ ok: true });
+    }
+
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return new Response("Expected a WebSocket upgrade.", { status: 426 });
     }
 
-    const documentId = new URL(request.url).searchParams.get("documentId");
+    const documentId = url.searchParams.get("documentId");
     if (!documentId) {
       return Response.json({ error: "documentId is required." }, { status: 400 });
     }
@@ -56,17 +98,29 @@ export class DocumentSession {
     if (!loaded) {
       return Response.json({ error: "Document not found or session mismatch." }, { status: 404 });
     }
+    const userId = await getSessionUserId(request, this.env.AUTH_SECRET);
+    if (!userId) return Response.json({ error: "Sign in required." }, { status: 401 });
 
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
     this.state.acceptWebSocket(server);
+    server.serializeAttachment({ userId, documentId });
     this.handleOpen(server);
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
+  async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (!(await this.canEdit(socket))) {
+      try {
+        socket.close(1008, "Document edit permission was revoked");
+      } catch (error) {
+        console.error("Unable to close a socket without edit permission.", error);
+      }
+      return;
+    }
+
     const raw = typeof message === "string" ? message : new TextDecoder().decode(message);
     let payload: unknown;
 
@@ -102,6 +156,39 @@ export class DocumentSession {
       return;
     }
 
+    if (candidate.type === "save") {
+      const requestId = candidate.requestId;
+      if (requestId !== undefined && (typeof requestId !== "string" || requestId.length > 80)) {
+        this.sendError(socket, "Invalid save request ID.");
+        return;
+      }
+      try {
+        await this.draftWrite;
+        if (this.dirty) {
+          await this.alarm();
+        }
+        const acknowledged = !this.dirty && this.persistedRevision >= this.revision;
+        this.sendMessage(socket, {
+          type: acknowledged ? "save" : "save-error",
+          documentId: this.documentId,
+          revision: this.persistedRevision,
+          savedAt: Date.now(),
+          ...(typeof requestId === "string" ? { requestId } : {}),
+        });
+      } catch (error) {
+        console.error("Unable to save a document on request.", {
+          documentId: this.documentId,
+          error,
+        });
+        this.sendMessage(socket, {
+          type: "save-error",
+          revision: this.revision,
+          ...(typeof requestId === "string" ? { requestId } : {}),
+        });
+      }
+      return;
+    }
+
     if (candidate.type === "text-patch") {
       if (
         !Number.isInteger(candidate.start) ||
@@ -116,23 +203,47 @@ export class DocumentSession {
       }
 
       const patch = candidate as unknown as TextPatchMessage;
+      if (
+        patch.clientMutationId !== undefined &&
+        (typeof patch.clientMutationId !== "string" || patch.clientMutationId.length > 80)
+      ) {
+        this.sendError(socket, "Invalid client mutation ID.");
+        return;
+      }
       this.content =
         this.content.slice(0, patch.start) +
         patch.insert +
         this.content.slice(patch.start + patch.deleteCount);
+      this.revision += 1;
+      const patchRevision = this.revision;
       this.dirty = true;
 
-      void this.persistDraftAndScheduleSave().catch(() => {
+      this.broadcast({ ...patch, revision: patchRevision }, socket);
+      try {
+        await this.persistDraftAndScheduleSave();
+      } catch (error) {
+        console.error("Unable to persist the latest document draft.", {
+          documentId: this.documentId,
+          revision: patchRevision,
+          error,
+        });
         this.sendError(socket, "Unable to persist the latest draft.");
-      });
-      this.broadcast(patch, socket);
+        return;
+      }
+      if (patch.clientMutationId) {
+        this.sendMessage(socket, {
+          type: "patch-accepted",
+          clientMutationId: patch.clientMutationId,
+          revision: patchRevision,
+        });
+      }
       return;
     }
 
     this.sendError(socket, "Unsupported message type.");
   }
 
-  webSocketClose(socket: WebSocket, _code: number, _reason: string, _wasClean: boolean): void {
+  webSocketClose(socket: WebSocket): void {
     this.sockets.delete(socket);
     this.broadcast({ type: "presence", event: "close" }, socket);
   }
@@ -142,25 +253,39 @@ export class DocumentSession {
   }
 
   async alarm(): Promise<void> {
+    if (!this.initialized) {
+      const documentId = await this.state.storage.get<string>("documentId");
+      if (documentId) await this.loadDocument(documentId);
+    }
+
     if (this.dirty && this.documentId) {
       const contentToSave = this.content;
+      const revisionToSave = this.revision;
       try {
         const db = drizzle(this.env.DB);
-        await db
+        const [savedDocument] = await db
           .update(documents)
           .set({ content: contentToSave, updatedAt: new Date() })
-          .where(eq(documents.id, this.documentId));
+          .where(eq(documents.id, this.documentId))
+          .returning({ id: documents.id });
+        if (!savedDocument) throw new Error("Document no longer exists.");
 
-        if (this.content === contentToSave) {
-          this.dirty = false;
-          this.broadcast({
-            type: "save",
-            documentId: this.documentId,
-            savedAt: Date.now(),
-          });
-        }
+        this.persistedRevision = Math.max(this.persistedRevision, revisionToSave);
+        await this.state.storage.put("persistedRevision", this.persistedRevision);
+        this.dirty = this.revision > this.persistedRevision;
+        this.broadcast({
+          type: "save",
+          documentId: this.documentId,
+          revision: this.persistedRevision,
+          savedAt: Date.now(),
+        });
       } catch {
+        console.error("Unable to save the latest document revision.", {
+          documentId: this.documentId,
+          revision: revisionToSave,
+        });
         this.dirty = true;
+        this.broadcast({ type: "save-error", revision: revisionToSave });
       }
     }
 
@@ -192,9 +317,13 @@ export class DocumentSession {
 
       this.documentId = documentId;
       this.content = (await this.state.storage.get<string>("content")) ?? document.content;
+      this.revision = (await this.state.storage.get<number>("revision")) ?? 0;
+      this.persistedRevision = (await this.state.storage.get<number>("persistedRevision")) ?? 0;
+      this.dirty = this.revision > this.persistedRevision;
       this.initialized = true;
       await this.state.storage.put("documentId", documentId);
       await this.state.storage.put("content", this.content);
+      if (this.dirty) await this.state.storage.setAlarm(Date.now() + SAVE_INTERVAL_MS);
       return true;
     })();
 
@@ -205,19 +334,62 @@ export class DocumentSession {
     }
   }
 
+  private async canEdit(socket: WebSocket): Promise<boolean> {
+    const attachment = socket.deserializeAttachment() as { userId?: unknown; documentId?: unknown } | null;
+    if (
+      typeof attachment?.userId !== "string" ||
+      typeof attachment.documentId !== "string"
+    ) return false;
+    const documentId = attachment.documentId;
+    if (!(await this.loadDocument(documentId))) return false;
+    const db = drizzle(this.env.DB);
+    const [access] = await db
+      .select({
+        authorId: documents.authorId,
+        shareRole: documentShares.role,
+        emailVerifiedAt: users.emailVerifiedAt,
+      })
+      .from(documents)
+      .leftJoin(users, eq(users.id, attachment.userId))
+      .leftJoin(documentShares, and(
+        eq(documentShares.documentId, documents.id),
+        eq(documentShares.email, users.email),
+      ))
+      .where(eq(documents.id, documentId))
+      .limit(1);
+    return Boolean(
+      access &&
+      (access.authorId === attachment.userId ||
+        (access.emailVerifiedAt && access.shareRole === "editor")),
+    );
+  }
+
   private handleOpen(socket: WebSocket): void {
     this.sockets.add(socket);
-    socket.send(JSON.stringify({
+    this.sendMessage(socket, {
       type: "open",
       documentId: this.documentId,
       content: this.content,
-    }));
+      revision: this.revision,
+      persistedRevision: this.persistedRevision,
+    });
     this.broadcast({ type: "presence", event: "open" }, socket);
   }
 
-  private async persistDraftAndScheduleSave(): Promise<void> {
-    await this.state.storage.put("content", this.content);
-    await this.state.storage.setAlarm(Date.now() + SAVE_INTERVAL_MS);
+  private persistDraftAndScheduleSave(): Promise<void> {
+    const content = this.content;
+    const revision = this.revision;
+    const write = this.draftWrite.then(async () => {
+      await Promise.all([
+        this.state.storage.put("content", content),
+        this.state.storage.put("revision", revision),
+      ]);
+      await this.state.storage.setAlarm(Date.now() + SAVE_INTERVAL_MS);
+    });
+    this.draftWrite = write.catch((error: unknown) => {
+      console.error("Unable to persist a document draft.", error);
+    });
+    return write;
   }
 
   private getSockets(): Set<WebSocket> {
@@ -233,14 +405,23 @@ export class DocumentSession {
       if (socket === sender) continue;
       try {
         socket.send(encoded);
-      } catch {
+      } catch (error) {
+        console.error("Unable to broadcast a document room message.", error);
         this.sockets.delete(socket);
       }
     }
   }
 
   private sendError(socket: WebSocket, error: string): void {
-    socket.send(JSON.stringify({ type: "error", error }));
+    this.sendMessage(socket, { type: "error", error });
+  }
+
+  private sendMessage(socket: WebSocket, message: unknown): void {
+    try {
+      socket.send(JSON.stringify(message));
+    } catch (sendError) {
+      console.error("Unable to send a document room message.", sendError);
+    }
   }
 
   private isValidSelection(value: unknown): value is { anchor: number; head: number } {

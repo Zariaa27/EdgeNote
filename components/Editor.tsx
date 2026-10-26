@@ -10,6 +10,7 @@ import {
   LoaderCircle,
   PanelRightClose,
   PanelRightOpen,
+  Save,
   Search,
   Sparkles,
   Wifi,
@@ -18,7 +19,8 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-type ConnectionState = "connecting" | "connected" | "reconnecting";
+type ConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected";
+type SaveState = "checking" | "saved" | "saving" | "unsaved" | "error";
 
 interface SearchResult {
   documentId: string;
@@ -41,6 +43,8 @@ export interface EditorProps {
   mediaUrlForKey?: (mediaKey: string) => string;
   /** Called when local or remote collaboration changes the Markdown content. */
   onContentChange?: (content: string) => void;
+  /** Render content without opening a realtime connection or allowing edits. */
+  readOnly?: boolean;
 }
 
 interface TextPatch {
@@ -48,6 +52,7 @@ interface TextPatch {
   start: number;
   deleteCount: number;
   insert: string;
+  clientMutationId?: string;
 }
 
 const EDITOR_TEXT = "min-h-[60vh] w-full resize-none bg-transparent px-5 py-6 font-mono text-[15px] leading-7 text-stone-800 outline-none placeholder:text-stone-400 sm:px-10 sm:py-9";
@@ -126,14 +131,18 @@ export default function Editor({
   initialContent = "",
   webSocketUrl,
   searchEndpoint = "/api/search",
-  mediaUrlForKey = (mediaKey) => `/api/media/${encodeURIComponent(mediaKey)}`,
+  mediaUrlForKey = (mediaKey) => `/api/media?key=${encodeURIComponent(mediaKey)}`,
   onContentChange,
+  readOnly = false,
 }: EditorProps) {
   const [content, setContent] = useState(initialContent);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
+  const [connectionError, setConnectionError] = useState("");
+  const [connectionRetry, setConnectionRetry] = useState(0);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [summary, setSummary] = useState("");
   const [summaryError, setSummaryError] = useState("");
+  const [summaryNotice, setSummaryNotice] = useState("");
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -142,50 +151,122 @@ export default function Editor({
   const [isUploading, setIsUploading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [peerCount, setPeerCount] = useState(0);
-  const [saveState, setSaveState] = useState<"saved" | "saving">("saved");
+  const [saveState, setSaveState] = useState<SaveState>("checking");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const contentRef = useRef(initialContent);
+  const onContentChangeRef = useRef(onContentChange);
+  const snapshotReceivedRef = useRef(false);
+  const localEditsRef = useRef(false);
+  const latestRevisionRef = useRef(0);
+  const persistedRevisionRef = useRef(0);
+  const pendingMutationsRef = useRef(new Set<string>());
+  const summarySaveWaiterRef = useRef<{
+    requestId: string;
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timeoutId: number;
+  } | null>(null);
+
+  useEffect(() => {
+    onContentChangeRef.current = onContentChange;
+  }, [onContentChange]);
 
   const updateContent = (next: string, sync = true) => {
+    if (readOnly) return;
     const previous = contentRef.current;
     contentRef.current = next;
     setContent(next);
     onContentChange?.(next);
 
     if (sync && previous !== next) {
+      localEditsRef.current = true;
       const socket = socketRef.current;
-      if (socket?.readyState === WebSocket.OPEN) {
+      if (socket?.readyState === WebSocket.OPEN && snapshotReceivedRef.current) {
+        const clientMutationId = crypto.randomUUID();
+        pendingMutationsRef.current.add(clientMutationId);
         setSaveState("saving");
-        socket.send(JSON.stringify(createPatch(previous, next)));
+        try {
+          socket.send(JSON.stringify({ ...createPatch(previous, next), clientMutationId }));
+        } catch {
+          pendingMutationsRef.current.delete(clientMutationId);
+          setSaveState("unsaved");
+          socket.close();
+        }
+      } else {
+        setSaveState("unsaved");
       }
     }
   };
 
   useEffect(() => {
+    if (readOnly) {
+      setConnection("disconnected");
+      setSaveState("saved");
+      return;
+    }
     let disposed = false;
     let retryTimer: number | undefined;
+    let handshakeTimer: number | undefined;
     let attempts = 0;
 
-    const connect = () => {
+    const scheduleRetry = (error: string) => {
+      setConnection("disconnected");
+      setConnectionError(error);
+      attempts += 1;
+      if (attempts >= 8) return;
+      retryTimer = window.setTimeout(() => {
+        setConnection("reconnecting");
+        void connect();
+      }, Math.min(1_000 * 2 ** Math.min(attempts - 1, 4), 15_000));
+    };
+
+    const connect = async () => {
       if (disposed) return;
       setConnection(attempts === 0 ? "connecting" : "reconnecting");
-      const url = webSocketUrl
-        ? new URL(webSocketUrl, window.location.href)
-        : new URL("/api/realtime", window.location.href);
-      url.protocol = url.protocol === "https:" ? "wss:" : url.protocol === "http:" ? "ws:" : url.protocol;
-      url.searchParams.set("documentId", documentId);
-
-      const socket = new WebSocket(url);
+      setConnectionError("");
+      let socket: WebSocket;
+      try {
+        const url = webSocketUrl
+          ? new URL(webSocketUrl, window.location.href)
+          : new URL("/api/realtime", window.location.href);
+        url.searchParams.set("documentId", documentId);
+        const healthUrl = new URL(url);
+        healthUrl.protocol = healthUrl.protocol === "wss:" ? "https:" : healthUrl.protocol === "ws:" ? "http:" : healthUrl.protocol;
+        const health = await fetch(healthUrl, { cache: "no-store" });
+        const healthPayload = await health.json().catch(() => null) as { error?: string } | null;
+        if (!health.ok) {
+          const error = healthPayload?.error ?? `Realtime check failed (${health.status}).`;
+          if (health.status >= 500) scheduleRetry(error);
+          else {
+            setConnection("disconnected");
+            setConnectionError(error);
+          }
+          return;
+        }
+        if (disposed) return;
+        url.protocol = url.protocol === "https:" ? "wss:" : url.protocol === "http:" ? "ws:" : url.protocol;
+        socket = new WebSocket(url);
+      } catch (error) {
+        scheduleRetry(error instanceof Error ? error.message : "Unable to start realtime connection.");
+        return;
+      }
       socketRef.current = socket;
+      let transportError = "";
+      handshakeTimer = window.setTimeout(() => {
+        if (socketRef.current === socket && !snapshotReceivedRef.current) {
+          setConnectionError("Realtime server did not send a document snapshot.");
+          socket.close();
+        }
+      }, 12_000);
 
       socket.onopen = () => {
-        attempts = 0;
-        setConnection("connected");
+        setConnection("connecting");
       };
 
       socket.onmessage = (event) => {
+        if (socketRef.current !== socket) return;
         let message: Record<string, unknown>;
         try {
           message = JSON.parse(String(event.data)) as Record<string, unknown>;
@@ -193,21 +274,45 @@ export default function Editor({
           return;
         }
 
+        const applyRemoteContent = (next: string) => {
+          contentRef.current = next;
+          setContent(next);
+          onContentChangeRef.current?.(next);
+        };
+
         if (message.type === "open" && typeof message.content === "string") {
           const serverContent = message.content;
           const localContent = contentRef.current;
-          if (localContent !== initialContent) {
+          snapshotReceivedRef.current = true;
+          if (handshakeTimer) window.clearTimeout(handshakeTimer);
+          pendingMutationsRef.current.clear();
+          attempts = 0;
+          setConnection("connected");
+          setConnectionError("");
+          const serverRevision = Number.isInteger(message.revision) ? Number(message.revision) : 0;
+          const serverPersistedRevision = Number.isInteger(message.persistedRevision)
+            ? Number(message.persistedRevision)
+            : serverRevision;
+          latestRevisionRef.current = Math.max(latestRevisionRef.current, serverRevision);
+          persistedRevisionRef.current = Math.max(persistedRevisionRef.current, serverPersistedRevision);
+          if (localEditsRef.current && localContent !== serverContent) {
             const pendingPatch = createPatch(serverContent, localContent);
-            contentRef.current = serverContent;
-            setContent(serverContent);
-            contentRef.current = localContent;
-            setContent(localContent);
-            onContentChange?.(localContent);
             if (socket.readyState === WebSocket.OPEN && (pendingPatch.deleteCount > 0 || pendingPatch.insert)) {
-              socket.send(JSON.stringify(pendingPatch));
+              const clientMutationId = crypto.randomUUID();
+              pendingMutationsRef.current.add(clientMutationId);
+              try {
+                socket.send(JSON.stringify({ ...pendingPatch, clientMutationId }));
+                setSaveState("saving");
+              } catch {
+                pendingMutationsRef.current.delete(clientMutationId);
+                setSaveState("unsaved");
+                socket.close();
+              }
             }
           } else {
-            updateContent(serverContent, false);
+            applyRemoteContent(serverContent);
+            localEditsRef.current = false;
+            setSaveState(serverPersistedRevision >= serverRevision ? "saved" : "saving");
           }
           return;
         }
@@ -218,8 +323,30 @@ export default function Editor({
           Number.isInteger(message.deleteCount) &&
           typeof message.insert === "string"
         ) {
-          updateContent(applyPatch(contentRef.current, message as unknown as TextPatch), false);
-          setSaveState("saving");
+          applyRemoteContent(applyPatch(contentRef.current, message as unknown as TextPatch));
+          if (Number.isInteger(message.revision)) {
+            latestRevisionRef.current = Math.max(latestRevisionRef.current, Number(message.revision));
+          }
+          setSaveState(persistedRevisionRef.current >= latestRevisionRef.current ? "saved" : "saving");
+          return;
+        }
+
+        if (
+          message.type === "patch-accepted" &&
+          typeof message.clientMutationId === "string" &&
+          Number.isInteger(message.revision)
+        ) {
+          pendingMutationsRef.current.delete(message.clientMutationId);
+          latestRevisionRef.current = Math.max(latestRevisionRef.current, Number(message.revision));
+          if (
+            pendingMutationsRef.current.size === 0 &&
+            persistedRevisionRef.current >= latestRevisionRef.current
+          ) {
+            setSaveState("saved");
+            localEditsRef.current = false;
+          } else {
+            setSaveState("saving");
+          }
           return;
         }
 
@@ -229,28 +356,86 @@ export default function Editor({
         if (message.type === "presence" && message.event === "close") {
           setPeerCount((count) => Math.max(0, count - 1));
         }
-        if (message.type === "save") setSaveState("saved");
+        if (message.type === "save" && Number.isInteger(message.revision)) {
+          persistedRevisionRef.current = Math.max(persistedRevisionRef.current, Number(message.revision));
+          if (
+            typeof message.requestId === "string" &&
+            message.requestId === summarySaveWaiterRef.current?.requestId
+          ) {
+            window.clearTimeout(summarySaveWaiterRef.current.timeoutId);
+            summarySaveWaiterRef.current.resolve();
+            summarySaveWaiterRef.current = null;
+          }
+          if (
+            persistedRevisionRef.current >= latestRevisionRef.current &&
+            pendingMutationsRef.current.size === 0
+          ) {
+            setSaveState("saved");
+            localEditsRef.current = false;
+          } else {
+            setSaveState("saving");
+          }
+          return;
+        }
+        if (message.type === "save-error") {
+          if (
+            typeof message.requestId === "string" &&
+            message.requestId === summarySaveWaiterRef.current?.requestId
+          ) {
+            window.clearTimeout(summarySaveWaiterRef.current.timeoutId);
+            summarySaveWaiterRef.current.reject(new Error("The latest edits could not be saved. Try again before summarizing."));
+            summarySaveWaiterRef.current = null;
+          }
+          if (
+            Number.isInteger(message.revision) &&
+            Number(message.revision) > persistedRevisionRef.current
+          ) setSaveState("error");
+          return;
+        }
+        if (message.type === "error") {
+          setSaveState("error");
+        }
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
+        if (handshakeTimer) window.clearTimeout(handshakeTimer);
         if (socketRef.current === socket) socketRef.current = null;
+        snapshotReceivedRef.current = false;
+        pendingMutationsRef.current.clear();
         if (disposed) return;
-        setConnection("reconnecting");
-        attempts += 1;
-        retryTimer = window.setTimeout(connect, Math.min(1_000 * 2 ** attempts, 15_000));
+        const closeDetails = transportError || (event.reason
+          ? `Connection closed (${event.code}): ${event.reason}`
+          : event.code === 1006
+            ? "WebSocket closed unexpectedly (1006). The Worker may not have completed the realtime upgrade; check Worker logs."
+            : `Connection closed (${event.code}).`);
+        if (localEditsRef.current || latestRevisionRef.current > persistedRevisionRef.current) {
+          setSaveState("unsaved");
+        }
+        scheduleRetry(closeDetails);
       };
 
-      socket.onerror = () => socket.close();
+      socket.onerror = () => {
+        transportError = "WebSocket transport failed. The browser cannot expose the server response; check Worker logs for the upgrade request.";
+        setConnectionError(transportError);
+        socket.close();
+      };
     };
 
-    connect();
+    void connect();
     return () => {
       disposed = true;
       if (retryTimer) window.clearTimeout(retryTimer);
+      if (handshakeTimer) window.clearTimeout(handshakeTimer);
+      if (summarySaveWaiterRef.current) {
+        window.clearTimeout(summarySaveWaiterRef.current.timeoutId);
+        summarySaveWaiterRef.current.reject(new Error("Realtime disconnected before the latest edits were saved."));
+        summarySaveWaiterRef.current = null;
+      }
+      snapshotReceivedRef.current = false;
       socketRef.current?.close();
       socketRef.current = null;
     };
-  }, [documentId, initialContent, webSocketUrl]);
+  }, [documentId, webSocketUrl, connectionRetry, readOnly]);
 
   const formatSelection = (before: string, after = before) => {
     const textarea = textareaRef.current;
@@ -272,6 +457,7 @@ export default function Editor({
   };
 
   const uploadImage = async (file: File) => {
+    if (readOnly) return;
     if (!file.type.startsWith("image/")) {
       setSummaryError("Choose an image file to upload.");
       return;
@@ -303,15 +489,38 @@ export default function Editor({
     setDrawerOpen(true);
     setIsSummarizing(true);
     setSummaryError("");
+    setSummaryNotice("");
+    setSummary("");
     try {
+      const socket = socketRef.current;
+      if (connection !== "connected" || socket?.readyState !== WebSocket.OPEN || !snapshotReceivedRef.current) {
+        throw new Error("Connect to the document before requesting a summary so the latest saved note can be used.");
+      }
+      const requestId = crypto.randomUUID();
+      await new Promise<void>((resolve, reject) => {
+        const timeoutId = window.setTimeout(() => {
+          if (summarySaveWaiterRef.current?.requestId !== requestId) return;
+          summarySaveWaiterRef.current = null;
+          reject(new Error("Timed out saving the latest edits. Try again."));
+        }, 15_000);
+        summarySaveWaiterRef.current = { requestId, resolve, reject, timeoutId };
+        try {
+          socket.send(JSON.stringify({ type: "save", requestId }));
+        } catch {
+          window.clearTimeout(timeoutId);
+          summarySaveWaiterRef.current = null;
+          reject(new Error("Could not request a save. Check the document connection and try again."));
+        }
+      });
       const response = await fetch("/api/ai/summarize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ documentId, content }),
+        body: JSON.stringify({ documentId }),
       });
-      const payload = await response.json() as { summary?: string; error?: string };
+      const payload = await response.json() as { summary?: string; error?: string; indexingWarning?: string };
       if (!response.ok || !payload.summary) throw new Error(payload.error ?? "Unable to summarize this document.");
       setSummary(payload.summary);
+      if (payload.indexingWarning) setSummaryNotice(payload.indexingWarning);
     } catch (error) {
       setSummaryError(error instanceof Error ? error.message : "Unable to summarize this document.");
     } finally {
@@ -356,6 +565,20 @@ export default function Editor({
     }));
   };
 
+  const saveNow = () => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN || !snapshotReceivedRef.current) {
+      setSaveState("unsaved");
+      return;
+    }
+    try {
+      setSaveState("saving");
+      socket.send(JSON.stringify({ type: "save" }));
+    } catch {
+      setSaveState("error");
+    }
+  };
+
   return (
     <section className="flex min-h-[calc(100vh-4rem)] flex-col overflow-hidden bg-[#f5f4ef] text-stone-900">
       <header className="flex min-h-14 items-center justify-between border-b border-stone-300 bg-[#fbfaf6] px-4 sm:px-6">
@@ -365,12 +588,56 @@ export default function Editor({
           <span className="hidden text-xs text-stone-400 sm:inline">/</span>
           <span className="hidden truncate font-mono text-xs text-stone-500 sm:inline">{documentId}</span>
         </div>
-        <div className="flex items-center gap-3">
-          <span className="hidden items-center gap-1.5 text-xs text-stone-500 sm:inline-flex">
-            {connection === "connected" ? <Wifi className="h-3.5 w-3.5 text-emerald-700" /> : <WifiOff className="h-3.5 w-3.5 text-amber-700" />}
-            {connection === "connected" ? `${peerCount + 1} in room` : connection}
-          </span>
-          <span className="text-xs text-stone-500">{saveState === "saved" ? "Saved" : "Saving"}</span>
+        <div className="flex items-center gap-2 sm:gap-3">
+          {!readOnly && <div className="flex items-center gap-1">
+            <span
+              role="status"
+              className={`inline-flex items-center gap-1.5 text-[10px] sm:text-xs ${
+                connection === "connected" ? "text-emerald-800" : "text-amber-800"
+              }`}
+              title={connectionError || (connection === "connected" ? "Realtime collaboration is connected." : "Realtime collaboration is not currently connected.")}
+            >
+              {connection === "connected" ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
+              {connection === "connected"
+                ? <><span className="hidden sm:inline">Connected · </span>{peerCount + 1} in room</>
+                : connection === "connecting" ? "Connecting" : connection === "reconnecting" ? "Reconnecting…" : "Disconnected"}
+            </span>
+            {connection === "disconnected" && (
+              <button
+                type="button"
+                onClick={() => setConnectionRetry((attempt) => attempt + 1)}
+                className="rounded px-1 text-[10px] font-semibold text-[#176b52] underline sm:text-xs"
+                title={connectionError || "Retry the realtime connection"}
+              >
+                Retry
+              </button>
+            )}
+          </div>}
+          {!readOnly && <button
+            type="button"
+            onClick={saveNow}
+            disabled={connection !== "connected" || saveState === "checking"}
+            aria-label={`Save document now. Current status: ${saveState}`}
+            aria-live="polite"
+            className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] transition hover:bg-stone-200 disabled:cursor-not-allowed disabled:opacity-60 sm:text-xs ${
+              saveState === "saved" ? "text-emerald-800" : saveState === "error" ? "text-rose-700" : saveState === "checking" ? "text-stone-500" : "text-amber-800"
+            }`}
+            title={connection !== "connected"
+              ? "Reconnect before saving; local edits are not yet confirmed."
+              : saveState === "saved"
+                ? "Latest acknowledged changes are saved to the database."
+                : saveState === "saving"
+                  ? "Changes are being synchronized and persisted."
+                  : saveState === "checking"
+                    ? "Checking the document's persisted revision."
+                  : saveState === "error"
+                    ? "The server could not persist the latest changes yet."
+                    : "Local changes have not yet been acknowledged by the server."
+            }
+          >
+            <Save className="h-3.5 w-3.5" />
+            {saveState === "saved" ? "Saved" : saveState === "saving" ? "Saving…" : saveState === "checking" ? "Checking…" : saveState === "error" ? "Save failed" : "Not saved"}
+          </button>}
           <button
             type="button"
             aria-label={drawerOpen ? "Close insights drawer" : "Open insights drawer"}
@@ -382,16 +649,21 @@ export default function Editor({
           </button>
         </div>
       </header>
+      {!readOnly && connection === "disconnected" && connectionError && (
+        <p role="alert" className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900 sm:px-6">
+          Realtime unavailable: {connectionError}
+        </p>
+      )}
 
       <div className="relative flex min-h-0 flex-1">
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="flex min-h-14 flex-wrap items-center gap-1 border-b border-stone-300 bg-[#f8f7f2] px-3 sm:px-6">
-            <button type="button" aria-label="Bold" title="Bold" className={TOOL_BUTTON} onClick={() => formatSelection("**")}><Bold className="h-4 w-4" /></button>
-            <button type="button" aria-label="Italic" title="Italic" className={TOOL_BUTTON} onClick={() => formatSelection("_")}><Italic className="h-4 w-4" /></button>
-            <button type="button" aria-label="Code block" title="Code block" className={TOOL_BUTTON} onClick={() => formatSelection("```\n", "\n```")}><Code2 className="h-4 w-4" /></button>
-            <button type="button" aria-label="Heading" title="Heading" className={TOOL_BUTTON} onClick={addHeading}><Heading1 className="h-4 w-4" /></button>
+            <button type="button" aria-label="Bold" title="Bold" disabled={readOnly} className={TOOL_BUTTON} onClick={() => formatSelection("**")}><Bold className="h-4 w-4" /></button>
+            <button type="button" aria-label="Italic" title="Italic" disabled={readOnly} className={TOOL_BUTTON} onClick={() => formatSelection("_")}><Italic className="h-4 w-4" /></button>
+            <button type="button" aria-label="Code block" title="Code block" disabled={readOnly} className={TOOL_BUTTON} onClick={() => formatSelection("```\n", "\n```")}><Code2 className="h-4 w-4" /></button>
+            <button type="button" aria-label="Heading" title="Heading" disabled={readOnly} className={TOOL_BUTTON} onClick={addHeading}><Heading1 className="h-4 w-4" /></button>
             <span className="mx-2 h-5 w-px bg-stone-300" />
-            <button type="button" aria-label="Upload image" title="Upload image" disabled={isUploading} className={TOOL_BUTTON} onClick={() => fileInputRef.current?.click()}>
+            <button type="button" aria-label="Upload image" title="Upload image" disabled={isUploading || readOnly} className={TOOL_BUTTON} onClick={() => fileInputRef.current?.click()}>
               {isUploading ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ImagePlus className="h-4 w-4" />}
             </button>
             <input
@@ -405,15 +677,16 @@ export default function Editor({
                 event.currentTarget.value = "";
               }}
             />
-            <button type="button" className="ml-auto inline-flex h-9 items-center gap-2 rounded-md bg-emerald-800 px-3 text-xs font-semibold text-white transition-colors hover:bg-emerald-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 disabled:opacity-50" onClick={() => void summarize()} disabled={isSummarizing}>
+            {!readOnly && <button type="button" className="ml-auto inline-flex h-9 items-center gap-2 rounded-md bg-emerald-800 px-3 text-xs font-semibold text-white transition-colors hover:bg-emerald-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 disabled:opacity-50" onClick={() => void summarize()} disabled={isSummarizing}>
               {isSummarizing ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
               AI Summarize
-            </button>
+            </button>}
           </div>
 
           <div
             className={`relative flex flex-1 justify-center overflow-y-auto ${isDragging ? "bg-emerald-50" : ""}`}
             onDragEnter={(event) => {
+              if (readOnly) return;
               event.preventDefault();
               setIsDragging(true);
             }}
@@ -423,6 +696,7 @@ export default function Editor({
             }}
             onDrop={(event) => {
               event.preventDefault();
+              if (readOnly) return;
               setIsDragging(false);
               const image = Array.from(event.dataTransfer.files).find((file) => file.type.startsWith("image/"));
               if (image) void uploadImage(image);
@@ -434,6 +708,7 @@ export default function Editor({
                 ref={textareaRef}
                 aria-label="Markdown document content"
                 value={content}
+                readOnly={readOnly}
                 onChange={(event) => updateContent(event.currentTarget.value)}
                 onClick={sendCursor}
                 onKeyUp={sendCursor}
@@ -447,10 +722,11 @@ export default function Editor({
                 </div>
               )}
               {summaryError && <p role="alert" className="mx-5 mt-3 text-sm text-rose-700 sm:mx-10">{summaryError}</p>}
+              {summaryNotice && <p role="status" className="mx-5 mt-3 text-sm text-amber-800 sm:mx-10">{summaryNotice}</p>}
             </div>
           </div>
           <footer className="flex h-9 items-center justify-between border-t border-stone-300 bg-[#fbfaf6] px-4 text-[11px] text-stone-500 sm:px-6">
-            <span>{content.length.toLocaleString()} characters</span>
+            <span>{content.length.toLocaleString()} characters · {readOnly ? "View only" : connection === "connected" ? "Realtime on" : saveState === "unsaved" || saveState === "error" ? "Offline changes are not confirmed" : connection === "disconnected" ? "Realtime unavailable" : "Reconnecting to realtime"}</span>
             <span>Markdown</span>
           </footer>
         </main>
