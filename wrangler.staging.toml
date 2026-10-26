@@ -3,6 +3,10 @@ main = "worker.ts"
 compatibility_date = "2026-10-25"
 compatibility_flags = ["nodejs_compat"]
 
+[vars]
+APP_URL = "https://edgenote-staging.atrudeau808.workers.dev"
+EMAIL_FROM = "accounts.no-reply@alexistrudeau.xyz"
+
 [assets]
 directory = ".open-next/assets"
 binding = "ASSETS"

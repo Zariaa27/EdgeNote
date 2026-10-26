@@ -7,12 +7,14 @@ For example, register an account (then verify its email); sign in to receive a c
 ```sh
 curl http://localhost:8787/api/auth/register \
   -H 'Content-Type: application/json' \
-  --data '{"name":"Alex Morgan","email":"alex@example.com","password":"use-a-unique-long-password"}'
+  --data '{"name":"Alex Morgan","email":"alex@example.com","password":"use-a-unique-long-password","termsAccepted":true}'
 
 curl -c cookies.txt http://localhost:8787/api/auth/login \
   -H 'Content-Type: application/json' \
   --data '{"email":"alex@example.com","password":"use-a-unique-long-password"}'
 ```
+
+Registration requires `termsAccepted: true`; the server records the acceptance timestamp and policy version. The UI acknowledgement also confirms the user is at least 13 and meets any higher local age or guardian-consent requirements.
 
 ## `GET /api/admin/analytics`
 
@@ -27,7 +29,9 @@ Returns account and document totals, counts created during the last seven days, 
 - `POST /api/auth/verification/resend` requests an email verification message. `POST /api/auth/verification/confirm` consumes the one-time link token.
 - `POST /api/auth/password-reset` requests a reset link. `POST /api/auth/password-reset/confirm` consumes the one-time token and updates the password.
 
-Configure `RESEND_API_KEY`, `EMAIL_FROM`, and `APP_URL` before using email-dependent workflows. Reset and verification requests return generic success messages when the account exists or not; rate limits apply to resends. Reset and verification tokens are hashed at rest and expire.
+Configure `RESEND_API_KEY`, `EMAIL_FROM`, and `APP_URL` before using email-dependent workflows. Cloudflare Email Routing may forward replies to the configured sender address, while Resend delivers outbound messages. Successful password sign-ins trigger a security notification; notification delivery is best-effort and does not block authentication. Reset and verification requests return generic success messages whether an account exists or not; verification resend is limited to one request per five minutes per account, with an additional five-minute browser-session cooldown in the login and verification forms. Reset and verification tokens are hashed at rest and expire. See [Email Setup](email-setup.md).
+
+Public legal pages are available at `/terms`, `/privacy`, and `/cookies`. Signup acceptance is recorded with the account; existing accounts are not blocked pending retroactive acceptance. The current cookie notice describes essential authentication and browser preference storage only.
 
 ## Document sharing
 

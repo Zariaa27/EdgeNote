@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Manrope, Newsreader } from "next/font/google";
+import CookieNotice from "../components/CookieNotice";
 import ThemeInitializer from "../components/ThemeInitializer";
 import "./globals.css";
 
@@ -17,6 +18,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <body className={`${manrope.variable} ${newsreader.variable}`}>
         <ThemeInitializer />
         {children}
+        <CookieNotice />
       </body>
     </html>
   );

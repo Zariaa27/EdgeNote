@@ -2,13 +2,18 @@ import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { users } from "../../../../src/db/schema";
+import {
+  sendLoginNotification,
+  type AccountEmailBindings,
+} from "../../../../src/server/account-email";
 import { createSessionCookie, isStrongSecret, verifyPassword } from "../../../../src/server/auth";
 
-interface LoginBindings {
+interface LoginBindings extends AccountEmailBindings {
   DB: D1Database;
   AUTH_SECRET: string;
 }
 
+/** Authenticate a verified account, set its session cookie, and send a sign-in notice. */
 export async function POST(request: Request): Promise<Response> {
   const body: unknown = await request.json().catch(() => null);
   if (!body || typeof body !== "object") {
@@ -45,8 +50,14 @@ export async function POST(request: Request): Promise<Response> {
     });
     response.headers.append("Set-Cookie", await createSessionCookie(user.id, env.AUTH_SECRET, request));
     response.headers.set("Cache-Control", "no-store");
+    try {
+      await sendLoginNotification(env, user.email);
+    } catch (error) {
+      console.error("Unable to send sign-in notification.", error);
+    }
     return response;
-  } catch {
+  } catch (error) {
+    console.error("Sign-in failed.", error);
     return Response.json({ error: "Unable to sign in." }, { status: 500 });
   }
 }

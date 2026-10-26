@@ -1,6 +1,14 @@
+/** Cookie name used to persist signed-in sessions. */
 export const SESSION_COOKIE = "edgenote_session";
+
+/** Maximum lifetime of a session cookie and its signed token, in seconds. */
 export const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 
+/**
+ * Check that a configured authentication secret has at least 32 UTF-8 bytes.
+ * @param secret Unknown value read from Worker bindings.
+ * @returns Whether the value is a string meeting the minimum length.
+ */
 export function isStrongSecret(secret: unknown): secret is string {
   return typeof secret === "string" && new TextEncoder().encode(secret).byteLength >= 32;
 }
@@ -34,6 +42,12 @@ async function importSessionKey(secret: string, usages: KeyUsage[]): Promise<Cry
   );
 }
 
+/**
+ * Create an HMAC-signed session token for a user.
+ * @param userId Stable account identifier placed in the token subject.
+ * @param secret Strong server-only key used to sign the token.
+ * @returns Compact URL-safe token containing signed session claims.
+ */
 export async function createSessionToken(userId: string, secret: string): Promise<string> {
   const claims: SessionClaims = {
     sub: userId,
@@ -48,6 +62,12 @@ export async function createSessionToken(userId: string, secret: string): Promis
   return `${payload}.${encodeBase64Url(new Uint8Array(signature))}`;
 }
 
+/**
+ * Read and validate the current user's ID from the session cookie.
+ * @param request Incoming request containing the session cookie.
+ * @param secret Strong server-only key used to verify the token.
+ * @returns The session subject when valid, otherwise `null`.
+ */
 export async function getSessionUserId(request: Request, secret: string): Promise<string | null> {
   if (!isStrongSecret(secret)) return null;
 
@@ -80,12 +100,24 @@ export async function getSessionUserId(request: Request, secret: string): Promis
   }
 }
 
+/**
+ * Create the HttpOnly session cookie for a successful sign-in.
+ * @param userId Stable account identifier for the session.
+ * @param secret Strong server-only key used to sign the token.
+ * @param request Request whose protocol determines whether `Secure` is set.
+ * @returns A `Set-Cookie` header value.
+ */
 export async function createSessionCookie(userId: string, secret: string, request: Request): Promise<string> {
   const token = await createSessionToken(userId, secret);
   const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
   return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}${secure}`;
 }
 
+/**
+ * Create a cookie header that expires the current session.
+ * @param request Request whose protocol determines whether `Secure` is set.
+ * @returns A `Set-Cookie` header value that clears the session cookie.
+ */
 export function clearSessionCookie(request: Request): string {
   const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
   return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;
@@ -107,6 +139,11 @@ async function derivePassword(password: string, salt: Uint8Array<ArrayBuffer>, i
   return new Uint8Array(bits);
 }
 
+/**
+ * Hash a password with PBKDF2-SHA-256 and a cryptographically random salt.
+ * @param password Plaintext password supplied during registration or reset.
+ * @returns Encoded algorithm, work factor, salt, and derived key.
+ */
 export async function hashPassword(password: string): Promise<string> {
   const salt = new Uint8Array(new ArrayBuffer(16)) as Uint8Array<ArrayBuffer>;
   crypto.getRandomValues(salt);
@@ -115,6 +152,12 @@ export async function hashPassword(password: string): Promise<string> {
   return `pbkdf2-sha256$${iterations}$${encodeBase64Url(salt)}$${encodeBase64Url(derived)}`;
 }
 
+/**
+ * Verify a password against a stored PBKDF2-SHA-256 password hash.
+ * @param password Candidate plaintext password.
+ * @param storedHash Encoded password hash retrieved from the user record.
+ * @returns Whether the candidate matches the supported stored hash format.
+ */
 export async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
   const [algorithm, iterationsValue, saltValue, hashValue, extra] = storedHash.split("$");
   if (algorithm !== "pbkdf2-sha256" || !iterationsValue || !saltValue || !hashValue || extra) return false;

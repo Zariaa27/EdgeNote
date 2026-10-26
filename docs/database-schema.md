@@ -19,6 +19,8 @@ erDiagram
         text name
         text password_hash
         integer email_verified_at
+        integer terms_accepted_at
+        text terms_version
         integer created_at
     }
     ACCOUNT_TOKENS {
@@ -75,6 +77,7 @@ erDiagram
 - A document has zero or more attachments. Deleting a document cascades to its attachments; `r2Key` stores the corresponding object key in R2.
 - Document shares grant `viewer` or `editor` access to a verified email address. The `(documentId, email)` pair is unique, and deleting the document removes its grants.
 - User email and tag name are unique. `isPublic` is a SQLite integer boolean and defaults to `false`.
+- `terms_accepted_at` and `terms_version` record the policy acknowledgement for newly registered accounts. They are nullable for accounts created before this requirement.
 
 ## Local Migrations
 
@@ -84,6 +87,8 @@ Generate SQL migrations from the schema, review the SQL in `drizzle/`, then appl
 npm run db:generate
 npm run db:migrate:local
 ```
+
+Apply reviewed migrations to staging with `npm run db:migrate:staging`. Use `npm run db:migrate:remote` only after confirming the production config and target.
 
 `drizzle.config.ts` writes SQL into `drizzle/`, and the D1 binding in `wrangler.toml` sets that directory as its `migrations_dir`. To check that the local tables were created:
 

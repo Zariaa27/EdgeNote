@@ -8,10 +8,12 @@
     "build": "opennextjs-cloudflare build",
     "preview": "opennextjs-cloudflare build && wrangler dev",
     "deploy": "opennextjs-cloudflare build && wrangler deploy",
+    "deploy:staging": "opennextjs-cloudflare build && wrangler deploy --config wrangler.staging.toml",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:staging": "wrangler d1 migrations apply DB --remote --config wrangler.staging.toml",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote"
   },
   "dependencies": {

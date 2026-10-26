@@ -81,14 +81,14 @@ export default function DocumentWorkspace({ documentId }: DocumentWorkspaceProps
 
   return (
     <main className="flex min-h-screen flex-col bg-[#f5f4ef]">
-      <header className="flex h-14 items-center gap-3 border-b border-stone-300 bg-[#fbfaf6] px-3 sm:px-6">
+      <header className="flex min-h-14 items-center gap-2 border-b border-stone-300 bg-[#fbfaf6] px-2 sm:gap-3 sm:px-6">
         <Link href="/workspace" aria-label="Back to workspace" title="Back to workspace" className="grid h-9 w-9 place-items-center rounded-md text-stone-600 hover:bg-stone-200"><ArrowLeft className="h-4 w-4" /></Link>
         <span className="hidden h-5 w-px bg-stone-300 sm:block" />
         <input value={title} readOnly={role === "viewer"} onChange={(event) => { setTitle(event.currentTarget.value); setTitleSaveState(event.currentTarget.value === savedTitle ? "saved" : "unsaved"); setTitleSaveError(""); }} onBlur={() => void updateTitle()} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} aria-label="Document title" maxLength={160} className="min-w-0 flex-1 bg-transparent text-sm font-semibold outline-none placeholder:text-stone-400 read-only:cursor-default" />
         {role !== "viewer" && <span role={titleSaveState === "error" ? "alert" : "status"} aria-live="polite" title={titleSaveError} className={`hidden text-xs sm:inline ${titleSaveState === "error" ? "text-rose-700" : titleSaveState === "saved" ? "text-emerald-800" : "text-amber-800"}`}>
           {titleSaveState === "saved" ? "Title saved" : titleSaveState === "saving" ? "Saving title…" : titleSaveState === "error" ? "Title not saved" : "Title not saved yet"}
         </span>}
-        {role === "viewer" && <span className="inline-flex items-center gap-1 text-xs text-stone-500"><LockKeyhole className="h-3.5 w-3.5" /> View only</span>}
+        {role === "viewer" && <span title="View only" className="inline-flex items-center gap-1 text-xs text-stone-500"><LockKeyhole className="h-3.5 w-3.5" /><span className="hidden sm:inline">View only</span></span>}
         {role === "owner" && <DocumentSharing documentId={documentId} isPublic={isPublic} onVisibilityChange={setIsPublic} />}
         <ThemeToggle />
         {role !== "viewer" && <Link href="/settings" aria-label="Account settings" title="Account settings" className="grid h-9 w-9 place-items-center rounded-md text-stone-500 hover:bg-stone-200"><Settings className="h-4 w-4" /></Link>}

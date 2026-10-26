@@ -38,12 +38,12 @@ Next.js 15 App Router and React provide the application UI and API routes. Drizz
 
 | Metric | Count |
 | --- | ---: |
-| Tracked source lines | 5,613 |
-| Tracked source files | 61 |
+| Source lines | 6,236 |
+| Source files | 69 |
 | App Router API endpoints | 19 |
-| D1 SQL migrations | 3 |
+| D1 SQL migrations | 4 |
 
-Source totals count tracked TypeScript, TSX, JavaScript, JSX, CSS, and SQL files; they exclude documentation and dependency lockfiles. These are repository snapshot counts and will change as the project grows.
+Source totals count TypeScript, TSX, JavaScript, JSX, CSS, and SQL files in the current repository snapshot, including non-ignored additions; they exclude documentation and dependency lockfiles. These counts will change as the project grows.
 
 ## Quickstart
 
@@ -106,6 +106,9 @@ This deploys the Worker configured in `wrangler.toml`; it does not deploy a Clou
 ```text
 app/
 	api/                 App Router API routes (auth, admin, AI, search, upload)
+	terms/               Public Terms of Service
+	privacy/              Public Privacy Policy
+	cookies/              Public cookie/browser storage notice
 	admin/               Restricted analytics dashboard
 	workspace/           Signed-in workspace
 components/
@@ -113,6 +116,9 @@ components/
 	Editor.tsx           Collaborative Markdown editor
 docs/
 	getting-started.md   Cloudflare resource and environment setup
+	email-setup.md       Routed reply address and transactional sender setup
+	developer-guide.md   Developer documentation and JSDoc conventions
+	...                API, data, component, realtime, and privacy guides
 	api-routes.md        API contracts and examples
 	architecture-realtime.md
 	database-schema.md
@@ -128,3 +134,5 @@ drizzle.config.ts      Drizzle Kit D1 configuration
 ```
 
 `drizzle/` contains the reviewed D1 migrations. The OpenNext Worker exports the `DocumentSession` Durable Object, and `/api/realtime` routes authenticated WebSocket upgrades to the document room described in [the real-time architecture guide](docs/architecture-realtime.md).
+
+For account email configuration and developer docs, see [Email Setup](docs/email-setup.md) and the [Developer Guide](docs/developer-guide.md).

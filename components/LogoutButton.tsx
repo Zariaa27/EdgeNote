@@ -29,10 +29,12 @@ export default function LogoutButton() {
         type="button"
         onClick={() => void signOut()}
         disabled={loggingOut}
+        aria-label={loggingOut ? "Signing out" : "Log out"}
+        title={loggingOut ? "Signing out" : "Log out"}
         className="inline-flex h-9 items-center gap-2 rounded-lg px-2 text-xs font-semibold text-stone-600 transition hover:bg-stone-200 hover:text-stone-900 disabled:opacity-60"
       >
         <LogOut className="h-4 w-4" />
-        <span>{loggingOut ? "Signing out…" : "Log out"}</span>
+        <span className="hidden sm:inline">{loggingOut ? "Signing out…" : "Log out"}</span>
       </button>
       {error && <span role="alert" className="text-xs text-rose-700">{error}</span>}
     </>

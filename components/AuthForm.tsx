@@ -2,13 +2,19 @@
 
 import Link from "next/link";
 import { ArrowRight, ArrowUpRight, Eye, EyeOff, LockKeyhole, Mail } from "lucide-react";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
+import {
+  getVerificationResendCooldownMs,
+  recordVerificationResend,
+} from "../src/client/verification-resend";
 import BrandMark from "./BrandMark";
 import ThemeToggle from "./ThemeToggle";
 
 interface AuthFormProps {
   mode: "login" | "register";
 }
+
+const VERIFICATION_RESEND_COOLDOWN_MS = 5 * 60 * 1000;
 
 export default function AuthForm({ mode }: AuthFormProps) {
   const isRegister = mode === "register";
@@ -19,21 +25,59 @@ export default function AuthForm({ mode }: AuthFormProps) {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [needsVerification, setNeedsVerification] = useState(false);
+  const [isResending, setIsResending] = useState(false);
+  const [resendAvailableAt, setResendAvailableAt] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const resendSecondsRemaining = Math.max(0, Math.ceil((resendAvailableAt - currentTime) / 1000));
+
+  useEffect(() => {
+    if (!needsVerification) return;
+    setCurrentTime(Date.now());
+    const remaining = getVerificationResendCooldownMs(email);
+    setResendAvailableAt(remaining > 0 ? Date.now() + remaining : 0);
+  }, [email, needsVerification]);
+
+  useEffect(() => {
+    if (resendAvailableAt <= 0) return;
+    const interval = window.setInterval(() => {
+      const now = Date.now();
+      setCurrentTime(now);
+      if (now >= resendAvailableAt) setResendAvailableAt(0);
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [resendAvailableAt]);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setIsSubmitting(true);
     setError("");
     setSuccess("");
+    setNeedsVerification(false);
     try {
       const response = await fetch(`/api/auth/${mode}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password, ...(isRegister ? { name } : {}) }),
+        body: JSON.stringify({
+          email,
+          password,
+          ...(isRegister ? {
+            name,
+            termsAccepted: new FormData(event.currentTarget).get("termsAccepted") === "on",
+          } : {}),
+        }),
       });
       const payload = await response.json() as { error?: string; message?: string; needsVerification?: boolean };
+      if (!isRegister && payload.needsVerification) {
+        setNeedsVerification(true);
+        setError("");
+        setSuccess(payload.error ?? "Verify your email address before signing in.");
+        setIsSubmitting(false);
+        return;
+      }
       if (!response.ok) throw new Error(payload.error ?? "Unable to authenticate.");
       if (isRegister && payload.needsVerification) {
+        recordVerificationResend(email);
         setSuccess(payload.message ?? "Check your email to verify your account before signing in.");
         setIsSubmitting(false);
         return;
@@ -46,6 +90,31 @@ export default function AuthForm({ mode }: AuthFormProps) {
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "Unable to authenticate.");
       setIsSubmitting(false);
+    }
+  };
+
+  const resendVerification = async () => {
+    if (isResending || resendSecondsRemaining > 0) return;
+    setIsResending(true);
+    setError("");
+    setSuccess("");
+    try {
+      const response = await fetch("/api/auth/verification/resend", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      const payload = await response.json() as { message?: string; error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "Unable to request verification.");
+      recordVerificationResend(email);
+      const availableAt = Date.now() + VERIFICATION_RESEND_COOLDOWN_MS;
+      setCurrentTime(Date.now());
+      setResendAvailableAt(availableAt);
+      setSuccess(payload.message ?? "If the account needs verification, an email will be sent shortly.");
+    } catch (resendError) {
+      setError(resendError instanceof Error ? resendError.message : "Unable to request verification.");
+    } finally {
+      setIsResending(false);
     }
   };
 
@@ -96,6 +165,14 @@ export default function AuthForm({ mode }: AuthFormProps) {
                 <input autoComplete="name" required maxLength={80} value={name} onChange={(event) => setName(event.currentTarget.value)} className="mt-2 h-12 w-full rounded-lg border border-stone-300 bg-white px-4 text-sm font-normal outline-none transition focus:border-[#176b52] focus:ring-2 focus:ring-[#176b52]/15" placeholder="Alex Morgan" />
               </label>
             )}
+            {isRegister && (
+              <label className="flex items-start gap-3 text-xs leading-5 text-stone-600">
+                <input type="checkbox" name="termsAccepted" required className="mt-1 h-4 w-4 accent-[#176b52]" />
+                <span>
+                  I agree to the <Link href="/terms" target="_blank" className="font-semibold text-[#176b52] underline">Terms</Link> and <Link href="/privacy" target="_blank" className="font-semibold text-[#176b52] underline">Privacy Policy</Link>. I am at least 13 and legally eligible to use EdgeNote where I live; if guardian consent is required, I have it.
+                </span>
+              </label>
+            )}
             <label className="block text-xs font-semibold text-stone-700">
               Email address
               <span className="relative mt-2 block">
@@ -114,8 +191,17 @@ export default function AuthForm({ mode }: AuthFormProps) {
               </span>
             </label>
 
-            {error && <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{error}</p>}
-            {success && <p role="status" className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">{success} <Link href="/verify-email" className="ml-1 font-semibold underline">Resend verification</Link></p>}
+            {error && !needsVerification && <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{error}</p>}
+            {success && <p role="status" className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">{success}{!needsVerification && <Link href="/verify-email" className="ml-1 font-semibold underline">Resend verification</Link>}</p>}
+            {needsVerification && (
+              <div className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+                <p className="text-sm text-amber-950">We’ll send a fresh verification link to <strong>{email}</strong>. You can request another in five minutes.</p>
+                {error && <p role="alert" className="text-sm text-rose-800">{error}</p>}
+                <button type="button" onClick={() => void resendVerification()} disabled={isResending || resendSecondsRemaining > 0} className="text-sm font-semibold text-[#176b52] underline disabled:cursor-not-allowed disabled:text-stone-400 disabled:no-underline">
+                  {isResending ? "Sending…" : resendSecondsRemaining > 0 ? `Resend available in ${Math.floor(resendSecondsRemaining / 60)}:${String(resendSecondsRemaining % 60).padStart(2, "0")}` : "Resend verification email"}
+                </button>
+              </div>
+            )}
 
             <button type="submit" disabled={isSubmitting} className="group flex h-12 w-full items-center justify-between rounded-lg bg-[#176b52] px-5 text-sm font-semibold text-white transition hover:bg-[#12543f] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#176b52] focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-70">
               <span>{isSubmitting ? "Please wait…" : isRegister ? "Create your account" : "Sign in"}</span>

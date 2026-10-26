@@ -2,12 +2,41 @@
 
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
+import {
+  getVerificationResendCooldownMs,
+  recordVerificationResend,
+} from "../src/client/verification-resend";
+
+const VERIFICATION_RESEND_COOLDOWN_MS = 5 * 60 * 1000;
 
 export default function VerifyEmail({ token }: { token: string }) {
   const [email, setEmail] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(Boolean(token));
+  const [resendAvailableAt, setResendAvailableAt] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const resendSecondsRemaining = Math.max(0, Math.ceil((resendAvailableAt - currentTime) / 1000));
+
+  useEffect(() => {
+    if (!email) {
+      setResendAvailableAt(0);
+      return;
+    }
+    setCurrentTime(Date.now());
+    const remaining = getVerificationResendCooldownMs(email);
+    setResendAvailableAt(remaining > 0 ? Date.now() + remaining : 0);
+  }, [email]);
+
+  useEffect(() => {
+    if (resendAvailableAt <= 0) return;
+    const interval = window.setInterval(() => {
+      const now = Date.now();
+      setCurrentTime(now);
+      if (now >= resendAvailableAt) setResendAvailableAt(0);
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [resendAvailableAt]);
 
   useEffect(() => {
     if (!token) return;
@@ -42,6 +71,9 @@ export default function VerifyEmail({ token }: { token: string }) {
       });
       const payload = await response.json() as { message?: string; error?: string };
       if (!response.ok) throw new Error(payload.error ?? "Unable to request verification.");
+      recordVerificationResend(email);
+      setCurrentTime(Date.now());
+      setResendAvailableAt(Date.now() + VERIFICATION_RESEND_COOLDOWN_MS);
       setMessage(payload.message ?? "Check your email for next steps.");
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Unable to request verification.");
@@ -63,7 +95,7 @@ export default function VerifyEmail({ token }: { token: string }) {
             <p className="mt-3 text-sm leading-6 text-stone-500">Enter your account email and we’ll send a fresh confirmation link.</p>
             <form onSubmit={(event) => void resend(event)} className="mt-7 space-y-4">
               <label className="block text-xs font-semibold text-stone-700">Email address<input type="email" required maxLength={254} value={email} onChange={(event) => setEmail(event.currentTarget.value)} className="mt-2 h-11 w-full rounded-lg border border-stone-300 bg-white px-3 text-sm font-normal outline-none focus:border-[#176b52]" /></label>
-              <button disabled={busy} className="h-11 w-full rounded-lg bg-[#176b52] text-sm font-semibold text-white disabled:opacity-60">{busy ? "Sending…" : "Send verification link"}</button>
+              <button disabled={busy || resendSecondsRemaining > 0} className="h-11 w-full rounded-lg bg-[#176b52] text-sm font-semibold text-white disabled:opacity-60">{busy ? "Sending…" : resendSecondsRemaining > 0 ? `Resend available in ${Math.floor(resendSecondsRemaining / 60)}:${String(resendSecondsRemaining % 60).padStart(2, "0")}` : "Send verification link"}</button>
             </form>
           </>
         )}

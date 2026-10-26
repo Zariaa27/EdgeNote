@@ -60,7 +60,9 @@ npx wrangler secret put UPLOAD_SIGNING_SECRET
 
 Do not use the Drizzle API token as an application secret or put secrets in `wrangler.toml` or any `NEXT_PUBLIC_*` variable.
 
-Account verification, email changes, and password recovery use Resend for transactional email. Configure the Resend API key as a Worker secret, set a verified sender address and the public app URL as Worker variables, and add these local values to `.dev.vars` for local development:
+Account verification, email changes, password recovery, document invitations, and successful-login notifications send outbound transactional email through Resend. Cloudflare Email Routing can receive replies and forward them to a destination inbox, but does not send outbound email. Follow [Email Setup](email-setup.md) to connect a routed address to the Resend sender domain.
+
+Add these local values to `.dev.vars` for local development:
 
 ```text
 RESEND_API_KEY=your-resend-api-key
@@ -68,7 +70,7 @@ EMAIL_FROM=EdgeNote <accounts@example.com>
 APP_URL=http://localhost:8787
 ```
 
-Use the deployed HTTPS URL for `APP_URL` in staging/production. Without these values, registration will not complete email verification, and the verification/reset actions will explicitly report that email delivery is not configured. Never commit the Resend key.
+Use the deployed HTTPS URL for `APP_URL` in staging/production. For staging, `EMAIL_FROM` and `APP_URL` are configured in `wrangler.staging.toml`; set `RESEND_API_KEY` as a Worker secret for the staging Worker. For production, set the secret and variables in the production Worker environment. Without email configuration, registration cannot send its verification link and email-dependent account actions report a configuration error. A successful login is still allowed if its notification cannot be delivered; the failure is logged. Never commit the Resend key.
 
 ## Apply Database Migrations
 
@@ -127,6 +129,21 @@ Confirm `wrangler.toml` contains the production D1 and KV IDs and that the Worke
 ```sh
 npm run db:migrate:remote
 npm run deploy
+```
+
+Deploy the staging Worker using its separate resources and config:
+
+```sh
+npm run deploy:staging
+```
+
+The staging Worker uses `wrangler.staging.toml`. Configure `AUTH_SECRET`, `UPLOAD_SIGNING_SECRET`, and `RESEND_API_KEY` as Worker secrets for that Worker before relying on authenticated or email-dependent flows.
+
+When schema changes are included, apply the reviewed migration to staging before deploying code that depends on it:
+
+```sh
+npm run db:migrate:staging
+npm run deploy:staging
 ```
 
 Configure the production domain in the Cloudflare Worker settings. After deployment, verify the app can register/sign in, access only the current user's documents, save edits to D1, resolve uploaded media, use AI/search, and reconnect realtime clients. Do not use production credentials or `--remote` for local experiments.

@@ -83,12 +83,12 @@ export default function AdminDashboard() {
 
   return (
     <main className="min-h-screen bg-[#f5f4ef] text-[#17251f]">
-      <header className="flex h-[68px] items-center justify-between border-b border-stone-300 bg-[#fbfaf6] px-5 sm:px-8">
-        <Link href="/workspace" className="inline-flex items-center gap-3 text-sm font-semibold"><BrandMark /> EdgeNote <span className="font-normal text-stone-400">/ Admin</span></Link>
-        <div className="flex items-center gap-2">
+      <header className="flex min-h-[68px] flex-wrap items-center justify-between gap-y-2 border-b border-stone-300 bg-[#fbfaf6] px-4 py-2 sm:px-8">
+        <Link href="/workspace" className="inline-flex min-w-0 items-center gap-2 text-sm font-semibold sm:gap-3"><BrandMark /> EdgeNote <span className="hidden font-normal text-stone-400 sm:inline">/ Admin</span></Link>
+        <div className="flex items-center gap-1 sm:gap-2">
           <ThemeToggle />
           <LogoutButton />
-          <Link href="/workspace" className="inline-flex items-center gap-2 text-xs font-semibold text-stone-600 hover:text-[#176b52]"><ArrowLeft className="h-4 w-4" /> Workspace</Link>
+          <Link href="/workspace" aria-label="Workspace" title="Workspace" className="inline-flex h-9 items-center gap-1 text-xs font-semibold text-stone-600 hover:text-[#176b52] sm:gap-2"><ArrowLeft className="h-4 w-4" /><span className="hidden sm:inline">Workspace</span></Link>
         </div>
       </header>
       <div className="mx-auto max-w-6xl px-5 py-10 sm:px-8 sm:py-14">
@@ -129,7 +129,7 @@ export default function AdminDashboard() {
             </div>
 
             <section className="mt-5 overflow-hidden rounded-2xl border border-stone-200 bg-white">
-              <div className="flex items-center justify-between border-b border-stone-200 px-5 py-4 sm:px-6">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 px-5 py-4 sm:px-6">
                 <div><h2 className="text-sm font-semibold">Recent accounts</h2><p className="mt-1 text-xs text-stone-400">Most recently created accounts</p></div>
                 <span className="font-mono text-[10px] text-stone-400">UPDATED {new Date(analytics.generatedAt).toLocaleTimeString()}</span>
               </div>

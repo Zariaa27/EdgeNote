@@ -59,10 +59,16 @@ html.dark [class~="bg-white/50"],
 html.dark [class~="bg-white/70"] { background-color: rgb(35 45 39 / 0.78); }
 html.dark [class~="bg-[#e8f0e9]"],
 html.dark [class~="bg-[#eaf1e9]"],
-html.dark [class~="bg-[#e8eee6]"] { background-color: #263a30; }
+html.dark [class~="bg-[#e8eee6]"],
+html.dark [class~="bg-[#e4e9df]"] { background-color: #263a30; }
+html.dark [class~="bg-[#f3ecd9]"] { background-color: #3a3322; }
+html.dark [class~="bg-[#e9edf4]"] { background-color: #27313c; }
+html.dark [class~="bg-[#f1e8e4]"] { background-color: #3b2d29; }
 html.dark [class~="bg-emerald-50"],
 html.dark [class~="bg-rose-50"],
 html.dark [class~="bg-amber-50"] { background-color: #29332e; }
+html.dark [class~="bg-stone-100"],
+html.dark [class~="bg-stone-200"] { background-color: #26312b; }
 
 html.dark [class~="text-[#17251f]"],
 html.dark [class~="text-stone-900"],
@@ -75,6 +81,10 @@ html.dark [class~="text-[#1d2e25]"] { color: #e2eae4; }
 html.dark [class~="text-[#53685a]"],
 html.dark [class~="text-[#77847c]"],
 html.dark [class~="text-[#78857d]"] { color: #a8b7ac; }
+html.dark [class~="text-[#38816a]"],
+html.dark [class~="text-[#8d6a23]"],
+html.dark [class~="text-[#496286]"],
+html.dark [class~="text-[#8f5d48]"] { color: #d5dfd8; }
 html.dark [class~="text-[#176b52]"],
 html.dark [class~="text-[#173b30]"],
 html.dark [class~="text-[#12543f]"],
@@ -85,8 +95,11 @@ html.dark [class~="text-emerald-900"] { color: #89c6a5; }
 html.dark [class~="text-rose-700"],
 html.dark [class~="text-rose-800"],
 html.dark [class~="text-rose-900"] { color: #f0a6a6; }
+html.dark [class~="text-rose-950"] { color: #ffd0d0; }
 html.dark [class~="text-amber-800"],
-html.dark [class~="text-amber-900"] { color: #eac477; }
+html.dark [class~="text-amber-900"],
+html.dark [class~="text-amber-700"] { color: #eac477; }
+html.dark [class~="text-amber-950"] { color: #f6d994; }
 
 html.dark [class~="border-stone-100"],
 html.dark [class~="border-stone-200"],
@@ -104,4 +117,17 @@ html.dark select {
 html.dark input::placeholder,
 html.dark textarea::placeholder {
   color: #84938a;
+}
+
+.landing-grid {
+  background-image:
+    repeating-linear-gradient(0deg, transparent 0 39px, rgb(23 59 48 / 0.07) 39px 40px),
+    repeating-linear-gradient(90deg, transparent 0 39px, rgb(23 59 48 / 0.07) 39px 40px);
+  background-position: center top;
+}
+
+html.dark .landing-grid {
+  background-image:
+    repeating-linear-gradient(0deg, transparent 0 39px, rgb(231 236 232 / 0.045) 39px 40px),
+    repeating-linear-gradient(90deg, transparent 0 39px, rgb(231 236 232 / 0.045) 39px 40px);
 }

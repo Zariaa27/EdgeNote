@@ -636,7 +636,7 @@ export default function Editor({
             }
           >
             <Save className="h-3.5 w-3.5" />
-            {saveState === "saved" ? "Saved" : saveState === "saving" ? "Saving…" : saveState === "checking" ? "Checking…" : saveState === "error" ? "Save failed" : "Not saved"}
+            <span className="hidden sm:inline">{saveState === "saved" ? "Saved" : saveState === "saving" ? "Saving…" : saveState === "checking" ? "Checking…" : saveState === "error" ? "Save failed" : "Not saved"}</span>
           </button>}
           <button
             type="button"
@@ -677,9 +677,9 @@ export default function Editor({
                 event.currentTarget.value = "";
               }}
             />
-            {!readOnly && <button type="button" className="ml-auto inline-flex h-9 items-center gap-2 rounded-md bg-emerald-800 px-3 text-xs font-semibold text-white transition-colors hover:bg-emerald-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 disabled:opacity-50" onClick={() => void summarize()} disabled={isSummarizing}>
+            {!readOnly && <button type="button" aria-label="AI Summarize" className="ml-auto inline-flex h-9 items-center gap-2 rounded-md bg-emerald-800 px-3 text-xs font-semibold text-white transition-colors hover:bg-emerald-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 disabled:opacity-50" onClick={() => void summarize()} disabled={isSummarizing}>
               {isSummarizing ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-              AI Summarize
+              <span className="hidden sm:inline">AI Summarize</span>
             </button>}
           </div>
 
@@ -725,8 +725,8 @@ export default function Editor({
               {summaryNotice && <p role="status" className="mx-5 mt-3 text-sm text-amber-800 sm:mx-10">{summaryNotice}</p>}
             </div>
           </div>
-          <footer className="flex h-9 items-center justify-between border-t border-stone-300 bg-[#fbfaf6] px-4 text-[11px] text-stone-500 sm:px-6">
-            <span>{content.length.toLocaleString()} characters · {readOnly ? "View only" : connection === "connected" ? "Realtime on" : saveState === "unsaved" || saveState === "error" ? "Offline changes are not confirmed" : connection === "disconnected" ? "Realtime unavailable" : "Reconnecting to realtime"}</span>
+          <footer className="flex h-9 min-w-0 items-center justify-between gap-2 border-t border-stone-300 bg-[#fbfaf6] px-3 text-[10px] text-stone-500 sm:px-6 sm:text-[11px]">
+            <span className="min-w-0 truncate">{content.length.toLocaleString()} characters · {readOnly ? "View only" : connection === "connected" ? "Realtime on" : saveState === "unsaved" || saveState === "error" ? "Offline changes are not confirmed" : connection === "disconnected" ? "Realtime unavailable" : "Reconnecting to realtime"}</span>
             <span>Markdown</span>
           </footer>
         </main>

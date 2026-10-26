@@ -10,6 +10,8 @@ import {
 } from "../../../../src/server/account-email";
 import { hashPassword, isStrongSecret } from "../../../../src/server/auth";
 
+const CURRENT_TERMS_VERSION = "2026-10-26";
+
 interface RegisterBindings extends AccountEmailBindings {
   DB: D1Database;
   AUTH_SECRET: string;
@@ -25,6 +27,9 @@ export async function POST(request: Request): Promise<Response> {
   const email = typeof input.email === "string" ? input.email.trim().toLowerCase() : "";
   const name = typeof input.name === "string" ? input.name.trim() : "";
   const password = typeof input.password === "string" ? input.password : "";
+  if (input.termsAccepted !== true) {
+    return Response.json({ error: "Accept the Terms and Privacy Policy and confirm age eligibility to create an account." }, { status: 400 });
+  }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
     return Response.json({ error: "Enter a valid email address." }, { status: 400 });
   }
@@ -44,7 +49,14 @@ export async function POST(request: Request): Promise<Response> {
     const db = drizzle(env.DB);
     const [user] = await db
       .insert(users)
-      .values({ email, name, passwordHash: await hashPassword(password), emailVerifiedAt: null })
+      .values({
+        email,
+        name,
+        passwordHash: await hashPassword(password),
+        emailVerifiedAt: null,
+        termsAcceptedAt: new Date(),
+        termsVersion: CURRENT_TERMS_VERSION,
+      })
       .returning({ id: users.id, email: users.email, name: users.name });
 
     const token = await createAccountToken(24 * 60 * 60 * 1000);
